@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import ICAL from 'ical.js';
 import Image from 'next/image';
 import {
@@ -11,7 +11,6 @@ import {
   Clock3,
   FileUp,
   Globe2,
-  Plus,
   ShieldCheck,
   UploadCloud,
   UsersRound,
@@ -30,10 +29,22 @@ type CalendarEvent = {
 type UploadedCalendar = {
   id: string;
   name: string;
+  owner: string;
   events: CalendarEvent[];
 };
 
 type UploadResult = { calendars: UploadedCalendar[]; errors: string[] };
+
+type StoredCalendar = Omit<UploadedCalendar, 'events'> & {
+  events: Array<Omit<CalendarEvent, 'start' | 'end'> & { start: string; end: string }>;
+};
+
+const STORAGE_KEY = 'bny-client-meeting-intelligence-v1';
+const MAX_LOOKAHEAD_DAYS = 90;
+type PersistedCalendars = { personal: UploadedCalendar | null; team: UploadedCalendar[] };
+const EMPTY_PERSISTED_CALENDARS: PersistedCalendars = { personal: null, team: [] };
+const calendarListeners = new Set<() => void>();
+let storedCalendars: PersistedCalendars | undefined;
 
 const acceptedFile = (file: File) => /\.(ics|txt)$/i.test(file.name);
 
@@ -45,36 +56,102 @@ function friendlyOwner(filename: string) {
   return filename.replace(/\.(ics|txt)$/i, '').replace(/[-_]+/g, ' ').trim() || 'Team member';
 }
 
+function externalAttendeesFor(event: ICAL.Event) {
+  return event.component
+    .getAllProperties('attendee')
+    .map((property) => cleanEmail(String(property.getFirstValue() ?? '')))
+    .filter((email) => email && !email.toLowerCase().includes('@bny.com'));
+}
+
+function toClientMeeting(event: ICAL.Event, start: Date, end: Date, owner: string, suffix: string): CalendarEvent | null {
+  const externalAttendees = externalAttendeesFor(event);
+  if (externalAttendees.length === 0) return null;
+
+  return {
+    id: `${owner}-${event.uid || suffix}-${start.getTime()}`,
+    title: event.summary || 'Untitled meeting',
+    start,
+    end,
+    externalAttendees: [...new Set(externalAttendees)],
+    owner,
+  };
+}
+
 function parseCalendar(text: string, owner: string): CalendarEvent[] {
   const component = new ICAL.Component(ICAL.parse(text));
   const now = new Date();
+  const lookahead = new Date(now);
+  lookahead.setDate(lookahead.getDate() + MAX_LOOKAHEAD_DAYS);
+  const records = component.getAllSubcomponents('vevent').map((vevent) => new ICAL.Event(vevent));
+  const masters = records.filter((event) => !event.isRecurrenceException());
 
-  return component.getAllSubcomponents('vevent').flatMap((vevent, index) => {
+  records.filter((event) => event.isRecurrenceException()).forEach((exception) => {
+    masters.find((event) => event.uid === exception.uid)?.relateException(exception);
+  });
+
+  return masters.flatMap((event, index) => {
     try {
-      const event = new ICAL.Event(vevent);
-      const start = event.startDate?.toJSDate();
-      const end = event.endDate?.toJSDate() ?? start;
-      if (!start || !end || end < now) return [];
+      if (!event.isRecurring()) {
+        const start = event.startDate?.toJSDate();
+        const end = event.endDate?.toJSDate() ?? start;
+        const clientMeeting = start && end && end >= now ? toClientMeeting(event, start, end, owner, String(index)) : null;
+        return clientMeeting ? [clientMeeting] : [];
+      }
 
-      const externalAttendees = vevent
-        .getAllProperties('attendee')
-        .map((property) => cleanEmail(String(property.getFirstValue() ?? '')))
-        .filter((email) => email && !email.toLowerCase().includes('@bny.com'));
-
-      if (externalAttendees.length === 0) return [];
-
-      return [{
-        id: `${owner}-${event.uid || index}-${start.getTime()}`,
-        title: event.summary || 'Untitled meeting',
-        start,
-        end,
-        externalAttendees: [...new Set(externalAttendees)],
-        owner,
-      }];
+      const occurrences: CalendarEvent[] = [];
+      const iterator = event.iterator();
+      let occurrence = iterator.next();
+      while (occurrence) {
+        const occurrenceStart = occurrence.toJSDate();
+        if (occurrenceStart > lookahead) break;
+        const details = event.getOccurrenceDetails(occurrence);
+        const start = details.startDate.toJSDate();
+        const end = details.endDate.toJSDate();
+        if (end >= now) {
+          const clientMeeting = toClientMeeting(details.item, start, end, owner, `${index}-${start.getTime()}`);
+          if (clientMeeting) occurrences.push(clientMeeting);
+        }
+        occurrence = iterator.next();
+      }
+      return occurrences;
     } catch {
       return [];
     }
   });
+}
+
+function reviveCalendar(calendar: StoredCalendar): UploadedCalendar {
+  const owner = calendar.owner || calendar.events[0]?.owner || friendlyOwner(calendar.name);
+  return {
+    ...calendar,
+    owner,
+    events: calendar.events.map((event) => ({ ...event, owner, start: new Date(event.start), end: new Date(event.end) })),
+  };
+}
+
+function readStoredCalendars(): PersistedCalendars {
+  if (typeof window === 'undefined') return EMPTY_PERSISTED_CALENDARS;
+  if (storedCalendars) return storedCalendars;
+  try {
+    const saved = window.localStorage.getItem(STORAGE_KEY);
+    const state = saved ? JSON.parse(saved) as { personal?: StoredCalendar | null; team?: StoredCalendar[] } : {};
+    storedCalendars = { personal: state.personal ? reviveCalendar(state.personal) : null, team: (state.team ?? []).map(reviveCalendar) };
+  } catch {
+    window.localStorage.removeItem(STORAGE_KEY);
+    storedCalendars = EMPTY_PERSISTED_CALENDARS;
+  }
+  return storedCalendars;
+}
+
+function subscribeToCalendars(listener: () => void) {
+  calendarListeners.add(listener);
+  return () => calendarListeners.delete(listener);
+}
+
+function saveCalendars(next: PersistedCalendars) {
+  storedCalendars = next;
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  calendarListeners.forEach((listener) => listener());
 }
 
 async function readCalendars(files: FileList | File[]): Promise<UploadResult> {
@@ -83,7 +160,7 @@ async function readCalendars(files: FileList | File[]): Promise<UploadResult> {
       if (!acceptedFile(file)) return `${file.name}: please upload an .ics or .txt calendar file.`;
       try {
         const events = parseCalendar(await file.text(), friendlyOwner(file.name));
-        return { id: `${file.name}-${file.lastModified}-${file.size}`, name: file.name, events };
+        return { id: `${file.name}-${file.lastModified}-${file.size}`, name: file.name, owner: friendlyOwner(file.name), events };
       } catch {
         return `${file.name}: this does not appear to be a valid iCalendar file.`;
       }
@@ -148,25 +225,66 @@ function EventList({ events, showOwner = false }: { events: CalendarEvent[]; sho
   </div>;
 }
 
+function CalendarControls({
+  rangeDays,
+  search,
+  onRangeChange,
+  onSearchChange,
+}: {
+  rangeDays: 7 | 30 | 90;
+  search: string;
+  onRangeChange: (days: 7 | 30 | 90) => void;
+  onSearchChange: (value: string) => void;
+}) {
+  return <div className="mt-5 flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/[.035] p-3 sm:flex-row sm:items-center sm:justify-between">
+    <div className="flex items-center gap-1 rounded-xl bg-bny-deep/70 p-1" aria-label="Date range">
+      {([7, 30, 90] as const).map((days) => <button key={days} type="button" onClick={() => onRangeChange(days)} className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${rangeDays === days ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/65 hover:text-bny-paper'}`}>Next {days} days</button>)}
+    </div>
+    <label className="flex min-w-0 items-center gap-2 rounded-xl border border-white/10 bg-bny-deep/40 px-3 py-2 text-sm text-bny-paper/55 sm:w-72">
+      <span className="sr-only">Search meetings</span>
+      <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0 fill-none stroke-current stroke-2"><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>
+      <input value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="Search title or attendee" className="min-w-0 flex-1 bg-transparent text-sm text-bny-paper outline-none placeholder:text-bny-paper/35" />
+    </label>
+  </div>;
+}
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState<'personal' | 'team'>('personal');
-  const [personal, setPersonal] = useState<UploadedCalendar | null>(null);
-  const [team, setTeam] = useState<UploadedCalendar[]>([]);
+  const persistedCalendars = useSyncExternalStore(subscribeToCalendars, readStoredCalendars, () => EMPTY_PERSISTED_CALENDARS);
+  const { personal, team } = persistedCalendars;
   const [errors, setErrors] = useState<string[]>([]);
+  const [rangeDays, setRangeDays] = useState<7 | 30 | 90>(30);
+  const [search, setSearch] = useState('');
 
-  const personalEvents = useMemo(() => (personal?.events ?? []).sort((a, b) => a.start.getTime() - b.start.getTime()), [personal]);
-  const teamEvents = useMemo(() => team.flatMap((calendar) => calendar.events).sort((a, b) => a.start.getTime() - b.start.getTime()), [team]);
-  const totalClientMeetings = personalEvents.length + teamEvents.length;
+  const filterEvents = useCallback((events: CalendarEvent[]) => {
+    const now = new Date();
+    const rangeEnd = new Date(now);
+    rangeEnd.setDate(rangeEnd.getDate() + rangeDays);
+    const query = search.trim().toLowerCase();
+    return events.filter((event) => {
+      const isWithinRange = event.end >= now && event.start <= rangeEnd;
+      const matchesSearch = !query || [event.title, event.owner, ...event.externalAttendees].join(' ').toLowerCase().includes(query);
+      return isWithinRange && matchesSearch;
+    }).sort((a, b) => a.start.getTime() - b.start.getTime());
+  }, [rangeDays, search]);
+
+  const personalEvents = useMemo(() => filterEvents(personal?.events ?? []), [filterEvents, personal]);
+  const teamEvents = useMemo(() => filterEvents(team.flatMap((calendar) => calendar.events)), [filterEvents, team]);
 
   const uploadPersonal = useCallback(async (files: FileList | File[]) => {
     const result = await readCalendars(files);
     setErrors(result.errors);
-    if (result.calendars[0]) setPersonal(result.calendars[0]);
+    if (result.calendars[0]) saveCalendars({ ...readStoredCalendars(), personal: result.calendars[0] });
   }, []);
   const uploadTeam = useCallback(async (files: FileList | File[]) => {
     const result = await readCalendars(files);
     setErrors(result.errors);
-    setTeam((current) => [...current, ...result.calendars.filter((next) => !current.some((existing) => existing.id === next.id))]);
+    const current = readStoredCalendars();
+    saveCalendars({ ...current, team: [...current.team, ...result.calendars.filter((next) => !current.team.some((existing) => existing.id === next.id))] });
+  }, []);
+  const updateTeamOwner = useCallback((id: string, owner: string) => {
+    const current = readStoredCalendars();
+    saveCalendars({ ...current, team: current.team.map((calendar) => calendar.id === id ? { ...calendar, owner, events: calendar.events.map((event) => ({ ...event, owner })) } : calendar) });
   }, []);
 
   return <main className="min-h-screen px-4 py-5 sm:px-6 lg:px-10 lg:py-8">
@@ -176,23 +294,19 @@ export default function Home() {
         <div className="flex items-center gap-3 rounded-2xl border border-bny-teal/20 bg-bny-teal/[.07] px-4 py-3 text-xs text-bny-paper/70"><ShieldCheck className="h-4 w-4 shrink-0 text-bny-teal" />Calendar data is processed locally</div>
       </header>
 
-      <section className="mt-7 grid gap-4 md:grid-cols-3">
-        <div className="rounded-2xl border border-white/10 bg-white/[.045] p-5"><p className="text-xs font-semibold uppercase tracking-[.16em] text-bny-paper/50">Client meetings found</p><p className="mt-3 text-4xl font-semibold text-bny-paper">{totalClientMeetings}</p><p className="mt-1 text-xs text-bny-teal">Across uploaded calendars</p></div>
-        <div className="rounded-2xl border border-white/10 bg-white/[.045] p-5"><p className="text-xs font-semibold uppercase tracking-[.16em] text-bny-paper/50">Personal calendar</p><p className="mt-3 text-4xl font-semibold text-bny-paper">{personalEvents.length}</p><p className="mt-1 text-xs text-bny-paper/55">Upcoming external meetings</p></div>
-        <div className="rounded-2xl border border-white/10 bg-white/[.045] p-5"><p className="text-xs font-semibold uppercase tracking-[.16em] text-bny-paper/50">Team calendars</p><p className="mt-3 text-4xl font-semibold text-bny-paper">{team.length}</p><p className="mt-1 text-xs text-bny-paper/55">Files in the shared view</p></div>
-      </section>
-
       <section className="mt-7"><div className="flex gap-2 border-b border-white/10" role="tablist" aria-label="Calendar views">
         {([{ key: 'personal', label: 'My Calendar', icon: CalendarDays }, { key: 'team', label: 'Team Calendars', icon: UsersRound }] as const).map(({ key, label, icon: Icon }) => <button key={key} type="button" role="tab" aria-selected={activeTab === key} onClick={() => setActiveTab(key)} className={`flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-semibold transition ${activeTab === key ? 'border-bny-teal text-bny-teal' : 'border-transparent text-bny-paper/55 hover:text-bny-paper'}`}><Icon className="h-4 w-4" />{label}</button>)}
       </div>
 
+      <CalendarControls rangeDays={rangeDays} search={search} onRangeChange={setRangeDays} onSearchChange={setSearch} />
+
       {errors.length > 0 && <div className="mt-5 flex items-start gap-3 rounded-xl border border-red-300/25 bg-red-400/10 p-4 text-sm text-red-100"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><div>{errors.map((error) => <p key={error}>{error}</p>)}</div><button type="button" onClick={() => setErrors([])} className="ml-auto"><X className="h-4 w-4" /></button></div>}
 
       {activeTab === 'personal' ? <div className="mt-6 grid gap-6 lg:grid-cols-[360px_1fr]">
-        <aside><div className="rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><div className="flex items-center gap-2 text-bny-teal"><Globe2 className="h-5 w-5" /><h2 className="font-semibold">Personal calendar</h2></div><p className="mt-2 text-sm leading-6 text-bny-paper/60">Upload an iCalendar export. Meetings containing any attendee outside <span className="text-bny-paper">@bny.com</span> are highlighted.</p><div className="mt-5"><UploadZone onUpload={uploadPersonal} /></div>{personal && <div className="mt-4 flex items-center justify-between rounded-xl bg-white/[.05] p-3 text-xs"><span className="max-w-56 truncate text-bny-paper/70">{personal.name}</span><button type="button" onClick={() => setPersonal(null)} className="text-bny-teal hover:text-white">Remove</button></div>}</div></aside>
+        <aside><div className="rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><div className="flex items-center gap-2 text-bny-teal"><Globe2 className="h-5 w-5" /><h2 className="font-semibold">Personal calendar</h2></div><p className="mt-2 text-sm leading-6 text-bny-paper/60">Upload an iCalendar export. Only meetings with an attendee outside <span className="text-bny-paper">@bny.com</span> are shown.</p><div className="mt-5"><UploadZone onUpload={uploadPersonal} /></div>{personal && <div className="mt-4 flex items-center justify-between rounded-xl bg-white/[.05] p-3 text-xs"><span className="max-w-56 truncate text-bny-paper/70">{personal.name}</span><button type="button" onClick={() => saveCalendars({ ...readStoredCalendars(), personal: null })} className="text-bny-teal hover:text-white">Remove</button></div>}</div></aside>
         <div><div className="mb-4 flex items-end justify-between"><div><p className="text-xs font-bold uppercase tracking-[.17em] text-bny-teal">Upcoming meetings</p><h2 className="mt-1 text-xl font-semibold">My external client meetings</h2></div>{personal && <span className="hidden items-center gap-1.5 text-xs text-bny-paper/60 sm:flex"><CheckCircle2 className="h-4 w-4 text-bny-teal" /> Filter active</span>}</div><EventList events={personalEvents} /></div>
       </div> : <div className="mt-6 grid gap-6 lg:grid-cols-[360px_1fr]">
-        <aside><div className="rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><div className="flex items-center gap-2 text-bny-teal"><UsersRound className="h-5 w-5" /><h2 className="font-semibold">Team calendar files</h2></div><p className="mt-2 text-sm leading-6 text-bny-paper/60">Add one or many calendar exports. File names identify the meeting owner in the combined view.</p><div className="mt-5"><UploadZone multiple onUpload={uploadTeam} /></div>{team.length > 0 && <div className="mt-4 space-y-2">{team.map((calendar) => <div key={calendar.id} className="flex items-center justify-between gap-3 rounded-xl bg-white/[.05] p-3 text-xs"><span className="min-w-0 truncate text-bny-paper/70">{calendar.name}</span><button type="button" onClick={() => setTeam((current) => current.filter((item) => item.id !== calendar.id))} className="shrink-0 text-bny-teal hover:text-white">Remove</button></div>)}</div>}</div></aside>
+        <aside><div className="rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><div className="flex items-center gap-2 text-bny-teal"><UsersRound className="h-5 w-5" /><h2 className="font-semibold">Team calendar files</h2></div><p className="mt-2 text-sm leading-6 text-bny-paper/60">Add one or many calendar exports, then set a clear owner name for each combined calendar.</p><div className="mt-5"><UploadZone multiple onUpload={uploadTeam} /></div>{team.length > 0 && <div className="mt-4 space-y-3">{team.map((calendar) => <div key={calendar.id} className="rounded-xl bg-white/[.05] p-3 text-xs"><p className="mb-2 truncate text-bny-paper/50">{calendar.name}</p><label className="block text-[10px] font-bold uppercase tracking-[.14em] text-bny-paper/45">Calendar owner<input value={calendar.owner} onChange={(event) => updateTeamOwner(calendar.id, event.target.value)} placeholder="Team member name" className="mt-1.5 w-full rounded-lg border border-white/10 bg-bny-deep/50 px-2.5 py-2 text-sm normal-case tracking-normal text-bny-paper outline-none placeholder:text-bny-paper/30 focus:border-bny-teal" /></label><button type="button" onClick={() => { const current = readStoredCalendars(); saveCalendars({ ...current, team: current.team.filter((item) => item.id !== calendar.id) }); }} className="mt-3 text-bny-teal hover:text-white">Remove</button></div>)}</div>}</div></aside>
         <div><div className="mb-4 flex items-end justify-between"><div><p className="text-xs font-bold uppercase tracking-[.17em] text-bny-teal">Team overview</p><h2 className="mt-1 text-xl font-semibold">All external client meetings</h2></div><span className="hidden items-center gap-1.5 text-xs text-bny-paper/60 sm:flex"><Clock3 className="h-4 w-4 text-bny-teal" /> Chronological</span></div><EventList events={teamEvents} showOwner /></div>
       </div>}</section>
 
