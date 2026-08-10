@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-bny-navy: #00243d;
+  --color-bny-deep: #001827;
+  --color-bny-surface: #00334f;
+  --color-bny-teal: #55c7d3;
+  --color-bny-primary: #2d9bad;
+  --color-bny-gold: #b07e25;
+  --color-bny-paper: #f6f3ee;
+  --font-sans: Arial, Helvetica, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html { min-height: 100%; background: #00243d; }
+body {
+  min-height: 100vh;
+  margin: 0;
+  color: #f6f3ee;
+  background:
+    radial-gradient(circle at 8% 5%, rgba(45, 155, 173, .2), transparent 30%),
+    radial-gradient(circle at 88% 4%, rgba(176, 126, 37, .15), transparent 26%),
+    #00243d;
+}
+::selection { background: #55c7d3; color: #001827; }
