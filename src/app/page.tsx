@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import ICAL from 'ical.js';
 import Image from 'next/image';
 import {
@@ -34,6 +34,7 @@ type UploadedCalendar = {
 };
 
 type UploadResult = { calendars: UploadedCalendar[]; errors: string[] };
+type TeamWorkspaceRow = { calendars?: StoredCalendar[] };
 
 type StoredCalendar = Omit<UploadedCalendar, 'events'> & {
   events: Array<Omit<CalendarEvent, 'start' | 'end'> & { start: string; end: string }>;
@@ -154,6 +155,25 @@ function saveCalendars(next: PersistedCalendars) {
   calendarListeners.forEach((listener) => listener());
 }
 
+async function fetchSharedTeamCalendars(): Promise<UploadedCalendar[] | null> {
+  const response = await fetch('/api/supabase/rest/v1/calendar_team_workspaces?workspace_key=eq.team-calendars&select=calendars', { cache: 'no-store' });
+  if (response.status === 503) return null;
+  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Could not load team calendars.');
+  const rows = await response.json() as TeamWorkspaceRow[];
+  return rows[0]?.calendars?.map(reviveCalendar) ?? [];
+}
+
+async function saveSharedTeamCalendars(team: UploadedCalendar[]) {
+  const response = await fetch('/api/supabase/rest/v1/calendar_team_workspaces?on_conflict=workspace_key', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify({ workspace_key: 'team-calendars', calendars: team }),
+  });
+  if (response.status === 503) return false;
+  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Could not save team calendars.');
+  return true;
+}
+
 async function readCalendars(files: FileList | File[]): Promise<UploadResult> {
   const uploads = await Promise.all(
     Array.from(files).map(async (file): Promise<UploadedCalendar | string> => {
@@ -225,6 +245,24 @@ function EventList({ events, showOwner = false }: { events: CalendarEvent[]; sho
   </div>;
 }
 
+function ClientTracker({ events }: { events: CalendarEvent[] }) {
+  const clients = useMemo(() => {
+    const grouped = new Map<string, { domain: string; contacts: Set<string>; owners: Set<string>; events: CalendarEvent[] }>();
+    events.forEach((event) => event.externalAttendees.forEach((email) => {
+      const domain = email.split('@')[1]?.toLowerCase() || email.toLowerCase();
+      const client = grouped.get(domain) ?? { domain, contacts: new Set<string>(), owners: new Set<string>(), events: [] };
+      client.contacts.add(email);
+      client.owners.add(event.owner);
+      if (!client.events.some((meeting) => meeting.id === event.id)) client.events.push(event);
+      grouped.set(domain, client);
+    }));
+    return [...grouped.values()].map((client) => ({ ...client, events: client.events.sort((a, b) => a.start.getTime() - b.start.getTime()) })).sort((a, b) => a.events[0].start.getTime() - b.events[0].start.getTime());
+  }, [events]);
+
+  if (!clients.length) return <div className="rounded-2xl border border-white/10 bg-white/[0.035] px-6 py-12 text-center"><UsersRound className="mx-auto h-7 w-7 text-bny-teal/60" /><p className="mt-3 text-sm font-semibold text-bny-paper">No client relationships found</p><p className="mt-1 text-xs text-bny-paper/55">Upload team calendars or expand the selected date range.</p></div>;
+  return <div className="overflow-x-auto rounded-2xl border border-white/10 bg-[#002c47]/65"><table className="w-full min-w-[760px] text-left"><thead className="border-b border-white/10 text-[11px] font-bold uppercase tracking-[.16em] text-bny-paper/45"><tr><th className="px-5 py-3">Client</th><th className="px-5 py-3">Client contacts</th><th className="px-5 py-3">BNY team</th><th className="px-5 py-3">Next conversation</th><th className="px-5 py-3">Upcoming</th></tr></thead><tbody className="divide-y divide-white/10">{clients.map((client) => { const next = client.events[0]; return <tr key={client.domain} className="align-top"><td className="px-5 py-5"><p className="font-semibold text-bny-paper">{client.domain}</p><p className="mt-1 text-xs text-bny-paper/45">External organization</p></td><td className="px-5 py-5"><div className="flex max-w-60 flex-wrap gap-1.5">{[...client.contacts].map((contact) => <span key={contact} className="rounded-full border border-bny-gold/35 bg-bny-gold/10 px-2.5 py-1 text-xs text-[#f0d89a]">{contact}</span>)}</div></td><td className="px-5 py-5 text-sm text-bny-paper/75">{[...client.owners].join(', ')}</td><td className="px-5 py-5"><p className="text-sm font-medium text-bny-paper">{formatDate(next.start)}</p><p className="mt-1 text-xs text-bny-teal">{formatTime(next.start)} · {next.title}</p></td><td className="px-5 py-5"><span className="rounded-full bg-bny-teal/15 px-2.5 py-1 text-xs font-semibold text-bny-teal">{client.events.length} meeting{client.events.length === 1 ? '' : 's'}</span></td></tr>; })}</tbody></table></div>;
+}
+
 function CalendarControls({
   rangeDays,
   search,
@@ -255,6 +293,34 @@ export default function Home() {
   const [errors, setErrors] = useState<string[]>([]);
   const [rangeDays, setRangeDays] = useState<7 | 30 | 90>(30);
   const [search, setSearch] = useState('');
+  const [teamView, setTeamView] = useState<'meetings' | 'tracker'>('meetings');
+  const [syncState, setSyncState] = useState<'checking' | 'synced' | 'local'>('checking');
+
+  const persist = useCallback((next: PersistedCalendars, syncTeam = false) => {
+    saveCalendars(next);
+    if (!syncTeam) return;
+    setSyncState('checking');
+    void saveSharedTeamCalendars(next.team).then((synced) => setSyncState(synced ? 'synced' : 'local')).catch(() => setSyncState('local'));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function hydrateTeam() {
+      try {
+        const remoteTeam = await fetchSharedTeamCalendars();
+        if (cancelled) return;
+        const current = readStoredCalendars();
+        if (remoteTeam === null) { setSyncState('local'); return; }
+        if (remoteTeam.length > 0) saveCalendars({ ...current, team: remoteTeam });
+        else if (current.team.length > 0) await saveSharedTeamCalendars(current.team);
+        if (!cancelled) setSyncState('synced');
+      } catch {
+        if (!cancelled) setSyncState('local');
+      }
+    }
+    void hydrateTeam();
+    return () => { cancelled = true; };
+  }, []);
 
   const filterEvents = useCallback((events: CalendarEvent[]) => {
     const now = new Date();
@@ -274,24 +340,24 @@ export default function Home() {
   const uploadPersonal = useCallback(async (files: FileList | File[]) => {
     const result = await readCalendars(files);
     setErrors(result.errors);
-    if (result.calendars[0]) saveCalendars({ ...readStoredCalendars(), personal: result.calendars[0] });
-  }, []);
+    if (result.calendars[0]) persist({ ...readStoredCalendars(), personal: result.calendars[0] });
+  }, [persist]);
   const uploadTeam = useCallback(async (files: FileList | File[]) => {
     const result = await readCalendars(files);
     setErrors(result.errors);
     const current = readStoredCalendars();
-    saveCalendars({ ...current, team: [...current.team, ...result.calendars.filter((next) => !current.team.some((existing) => existing.id === next.id))] });
-  }, []);
+    persist({ ...current, team: [...current.team, ...result.calendars.filter((next) => !current.team.some((existing) => existing.id === next.id))] }, true);
+  }, [persist]);
   const updateTeamOwner = useCallback((id: string, owner: string) => {
     const current = readStoredCalendars();
-    saveCalendars({ ...current, team: current.team.map((calendar) => calendar.id === id ? { ...calendar, owner, events: calendar.events.map((event) => ({ ...event, owner })) } : calendar) });
-  }, []);
+    persist({ ...current, team: current.team.map((calendar) => calendar.id === id ? { ...calendar, owner, events: calendar.events.map((event) => ({ ...event, owner })) } : calendar) }, true);
+  }, [persist]);
 
   return <main className="min-h-screen px-4 py-5 sm:px-6 lg:px-10 lg:py-8">
     <div className="mx-auto max-w-7xl">
       <header className="flex flex-col gap-6 border-b border-white/10 pb-7 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-4"><div className="flex h-14 w-20 items-center justify-center rounded-xl border border-white/10 bg-white/[.06] px-2"><Image src="/bny-logo.svg" alt="BNY" width={160} height={48} className="h-auto w-full" priority /></div><div><p className="text-[11px] font-bold uppercase tracking-[.22em] text-bny-teal">Workplace automation</p><h1 className="mt-1 text-xl font-semibold tracking-tight text-bny-paper sm:text-2xl">Client Meeting Intelligence</h1></div></div>
-        <div className="flex items-center gap-3 rounded-2xl border border-bny-teal/20 bg-bny-teal/[.07] px-4 py-3 text-xs text-bny-paper/70"><ShieldCheck className="h-4 w-4 shrink-0 text-bny-teal" />Calendar data is processed locally</div>
+        <div className="flex items-center gap-3 rounded-2xl border border-bny-teal/20 bg-bny-teal/[.07] px-4 py-3 text-xs text-bny-paper/70"><ShieldCheck className="h-4 w-4 shrink-0 text-bny-teal" />Personal calendar stays local · Team data {syncState === 'synced' ? 'synced securely' : syncState === 'checking' ? 'checking connection' : 'saved locally'}</div>
       </header>
 
       <section className="mt-7"><div className="flex gap-2 border-b border-white/10" role="tablist" aria-label="Calendar views">
@@ -306,8 +372,8 @@ export default function Home() {
         <aside><div className="rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><div className="flex items-center gap-2 text-bny-teal"><Globe2 className="h-5 w-5" /><h2 className="font-semibold">Personal calendar</h2></div><p className="mt-2 text-sm leading-6 text-bny-paper/60">Upload an iCalendar export. Only meetings with an attendee outside <span className="text-bny-paper">@bny.com</span> are shown.</p><div className="mt-5"><UploadZone onUpload={uploadPersonal} /></div>{personal && <div className="mt-4 flex items-center justify-between rounded-xl bg-white/[.05] p-3 text-xs"><span className="max-w-56 truncate text-bny-paper/70">{personal.name}</span><button type="button" onClick={() => saveCalendars({ ...readStoredCalendars(), personal: null })} className="text-bny-teal hover:text-white">Remove</button></div>}</div></aside>
         <div><div className="mb-4 flex items-end justify-between"><div><p className="text-xs font-bold uppercase tracking-[.17em] text-bny-teal">Upcoming meetings</p><h2 className="mt-1 text-xl font-semibold">My external client meetings</h2></div>{personal && <span className="hidden items-center gap-1.5 text-xs text-bny-paper/60 sm:flex"><CheckCircle2 className="h-4 w-4 text-bny-teal" /> Filter active</span>}</div><EventList events={personalEvents} /></div>
       </div> : <div className="mt-6 grid gap-6 lg:grid-cols-[360px_1fr]">
-        <aside><div className="rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><div className="flex items-center gap-2 text-bny-teal"><UsersRound className="h-5 w-5" /><h2 className="font-semibold">Team calendar files</h2></div><p className="mt-2 text-sm leading-6 text-bny-paper/60">Add one or many calendar exports, then set a clear owner name for each combined calendar.</p><div className="mt-5"><UploadZone multiple onUpload={uploadTeam} /></div>{team.length > 0 && <div className="mt-4 space-y-3">{team.map((calendar) => <div key={calendar.id} className="rounded-xl bg-white/[.05] p-3 text-xs"><p className="mb-2 truncate text-bny-paper/50">{calendar.name}</p><label className="block text-[10px] font-bold uppercase tracking-[.14em] text-bny-paper/45">Calendar owner<input value={calendar.owner} onChange={(event) => updateTeamOwner(calendar.id, event.target.value)} placeholder="Team member name" className="mt-1.5 w-full rounded-lg border border-white/10 bg-bny-deep/50 px-2.5 py-2 text-sm normal-case tracking-normal text-bny-paper outline-none placeholder:text-bny-paper/30 focus:border-bny-teal" /></label><button type="button" onClick={() => { const current = readStoredCalendars(); saveCalendars({ ...current, team: current.team.filter((item) => item.id !== calendar.id) }); }} className="mt-3 text-bny-teal hover:text-white">Remove</button></div>)}</div>}</div></aside>
-        <div><div className="mb-4 flex items-end justify-between"><div><p className="text-xs font-bold uppercase tracking-[.17em] text-bny-teal">Team overview</p><h2 className="mt-1 text-xl font-semibold">All external client meetings</h2></div><span className="hidden items-center gap-1.5 text-xs text-bny-paper/60 sm:flex"><Clock3 className="h-4 w-4 text-bny-teal" /> Chronological</span></div><EventList events={teamEvents} showOwner /></div>
+        <aside><div className="rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><div className="flex items-center gap-2 text-bny-teal"><UsersRound className="h-5 w-5" /><h2 className="font-semibold">Team calendar files</h2></div><p className="mt-2 text-sm leading-6 text-bny-paper/60">Add one or many calendar exports, then set a clear owner name for each combined calendar.</p><div className="mt-5"><UploadZone multiple onUpload={uploadTeam} /></div>{team.length > 0 && <div className="mt-4 space-y-3">{team.map((calendar) => <div key={calendar.id} className="rounded-xl bg-white/[.05] p-3 text-xs"><p className="mb-2 truncate text-bny-paper/50">{calendar.name}</p><label className="block text-[10px] font-bold uppercase tracking-[.14em] text-bny-paper/45">Calendar owner<input value={calendar.owner} onChange={(event) => updateTeamOwner(calendar.id, event.target.value)} placeholder="Team member name" className="mt-1.5 w-full rounded-lg border border-white/10 bg-bny-deep/50 px-2.5 py-2 text-sm normal-case tracking-normal text-bny-paper outline-none placeholder:text-bny-paper/30 focus:border-bny-teal" /></label><button type="button" onClick={() => { const current = readStoredCalendars(); persist({ ...current, team: current.team.filter((item) => item.id !== calendar.id) }, true); }} className="mt-3 text-bny-teal hover:text-white">Remove</button></div>)}</div>}</div></aside>
+        <div><div className="mb-4 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><p className="text-xs font-bold uppercase tracking-[.17em] text-bny-teal">Team overview</p><h2 className="mt-1 text-xl font-semibold">{teamView === 'tracker' ? 'Client meeting tracker' : 'All external client meetings'}</h2></div><div className="flex items-center gap-3"><div className="flex rounded-xl border border-white/10 bg-bny-deep/50 p-1"><button type="button" onClick={() => setTeamView('meetings')} className={`rounded-lg px-3 py-2 text-xs font-semibold ${teamView === 'meetings' ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/60 hover:text-bny-paper'}`}>Meetings</button><button type="button" onClick={() => setTeamView('tracker')} className={`rounded-lg px-3 py-2 text-xs font-semibold ${teamView === 'tracker' ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/60 hover:text-bny-paper'}`}>Client tracker</button></div><span className="hidden items-center gap-1.5 text-xs text-bny-paper/60 sm:flex"><Clock3 className="h-4 w-4 text-bny-teal" /> Chronological</span></div></div>{teamView === 'tracker' ? <ClientTracker events={teamEvents} /> : <EventList events={teamEvents} showOwner />}</div>
       </div>}</section>
 
       <footer className="mt-10 flex items-center justify-between border-t border-white/10 py-5 text-xs text-bny-paper/40"><span>Client Meeting Intelligence</span><span className="flex items-center gap-1">Built for calendar visibility <ChevronRight className="h-3 w-3" /></span></footer>
