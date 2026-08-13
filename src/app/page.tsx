@@ -1,8 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import ICAL from 'ical.js';
 import Image from 'next/image';
+import { CalendarEvent, StoredCalendar, UploadedCalendar, friendlyOwner, parseCalendar, reviveCalendar } from '@/lib/calendar';
 import {
   AlertCircle,
   CalendarDays,
@@ -17,118 +17,16 @@ import {
   X,
 } from 'lucide-react';
 
-type CalendarEvent = {
-  id: string;
-  title: string;
-  start: Date;
-  end: Date;
-  externalAttendees: string[];
-  owner: string;
-};
-
-type UploadedCalendar = {
-  id: string;
-  name: string;
-  owner: string;
-  events: CalendarEvent[];
-};
-
 type UploadResult = { calendars: UploadedCalendar[]; errors: string[] };
 type TeamWorkspaceRow = { calendars?: StoredCalendar[] };
 
-type StoredCalendar = Omit<UploadedCalendar, 'events'> & {
-  events: Array<Omit<CalendarEvent, 'start' | 'end'> & { start: string; end: string }>;
-};
-
 const STORAGE_KEY = 'bny-client-meeting-intelligence-v1';
-const MAX_LOOKAHEAD_DAYS = 90;
 type PersistedCalendars = { personal: UploadedCalendar | null; team: UploadedCalendar[] };
 const EMPTY_PERSISTED_CALENDARS: PersistedCalendars = { personal: null, team: [] };
 const calendarListeners = new Set<() => void>();
 let storedCalendars: PersistedCalendars | undefined;
 
 const acceptedFile = (file: File) => /\.(ics|txt)$/i.test(file.name);
-
-function cleanEmail(value: string) {
-  return value.replace(/^mailto:/i, '').trim();
-}
-
-function friendlyOwner(filename: string) {
-  return filename.replace(/\.(ics|txt)$/i, '').replace(/[-_]+/g, ' ').trim() || 'Team member';
-}
-
-function externalAttendeesFor(event: ICAL.Event) {
-  return event.component
-    .getAllProperties('attendee')
-    .map((property) => cleanEmail(String(property.getFirstValue() ?? '')))
-    .filter((email) => email && !email.toLowerCase().includes('@bny.com'));
-}
-
-function toClientMeeting(event: ICAL.Event, start: Date, end: Date, owner: string, suffix: string): CalendarEvent | null {
-  const externalAttendees = externalAttendeesFor(event);
-  if (externalAttendees.length === 0) return null;
-
-  return {
-    id: `${owner}-${event.uid || suffix}-${start.getTime()}`,
-    title: event.summary || 'Untitled meeting',
-    start,
-    end,
-    externalAttendees: [...new Set(externalAttendees)],
-    owner,
-  };
-}
-
-function parseCalendar(text: string, owner: string): CalendarEvent[] {
-  const component = new ICAL.Component(ICAL.parse(text));
-  const now = new Date();
-  const lookahead = new Date(now);
-  lookahead.setDate(lookahead.getDate() + MAX_LOOKAHEAD_DAYS);
-  const records = component.getAllSubcomponents('vevent').map((vevent) => new ICAL.Event(vevent));
-  const masters = records.filter((event) => !event.isRecurrenceException());
-
-  records.filter((event) => event.isRecurrenceException()).forEach((exception) => {
-    masters.find((event) => event.uid === exception.uid)?.relateException(exception);
-  });
-
-  return masters.flatMap((event, index) => {
-    try {
-      if (!event.isRecurring()) {
-        const start = event.startDate?.toJSDate();
-        const end = event.endDate?.toJSDate() ?? start;
-        const clientMeeting = start && end && end >= now ? toClientMeeting(event, start, end, owner, String(index)) : null;
-        return clientMeeting ? [clientMeeting] : [];
-      }
-
-      const occurrences: CalendarEvent[] = [];
-      const iterator = event.iterator();
-      let occurrence = iterator.next();
-      while (occurrence) {
-        const occurrenceStart = occurrence.toJSDate();
-        if (occurrenceStart > lookahead) break;
-        const details = event.getOccurrenceDetails(occurrence);
-        const start = details.startDate.toJSDate();
-        const end = details.endDate.toJSDate();
-        if (end >= now) {
-          const clientMeeting = toClientMeeting(details.item, start, end, owner, `${index}-${start.getTime()}`);
-          if (clientMeeting) occurrences.push(clientMeeting);
-        }
-        occurrence = iterator.next();
-      }
-      return occurrences;
-    } catch {
-      return [];
-    }
-  });
-}
-
-function reviveCalendar(calendar: StoredCalendar): UploadedCalendar {
-  const owner = calendar.owner || calendar.events[0]?.owner || friendlyOwner(calendar.name);
-  return {
-    ...calendar,
-    owner,
-    events: calendar.events.map((event) => ({ ...event, owner, start: new Date(event.start), end: new Date(event.end) })),
-  };
-}
 
 function readStoredCalendars(): PersistedCalendars {
   if (typeof window === 'undefined') return EMPTY_PERSISTED_CALENDARS;
