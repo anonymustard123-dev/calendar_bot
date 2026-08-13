@@ -12,7 +12,9 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
 
   const { SUPABASE_URL, SUPABASE_ANON_KEY } = process.env;
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return NextResponse.json({ error: 'Supabase proxy is not configured.' }, { status: 503 });
-  const projectUrl = SUPABASE_URL.replace(/\/$/, '').replace(/\/rest\/v1$/, '');
+  // Accept either the Project URL or the Data API URL copied from Supabase,
+  // with or without the trailing slash: https://ref.supabase.co/rest/v1/.
+  const projectUrl = SUPABASE_URL.trim().replace(/\/+$/, '').replace(/\/rest\/v1$/, '');
   const target = `${projectUrl}/${ALLOWED_PATH}${new URL(request.url).search}`;
 
   try {
