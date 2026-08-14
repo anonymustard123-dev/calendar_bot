@@ -13,6 +13,8 @@ import {
   FileUp,
   Globe2,
   MessageCircle,
+  PanelRightClose,
+  PanelRightOpen,
   Send,
   Share2,
   UploadCloud,
@@ -246,7 +248,7 @@ function CalendarControls({
 
 type ChatMessage = { role: 'user' | 'assistant'; content: string };
 
-function CalendarChat({ personalEvents, teamEvents }: { personalEvents: CalendarEvent[]; teamEvents: CalendarEvent[] }) {
+function CalendarChat({ personalEvents, teamEvents, isOpen, onToggle }: { personalEvents: CalendarEvent[]; teamEvents: CalendarEvent[]; isOpen: boolean; onToggle: () => void }) {
   const [messages, setMessages] = useState<ChatMessage[]>([{ role: 'assistant', content: 'Ask me about upcoming meetings, clients, or team coverage.' }]);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
@@ -274,11 +276,11 @@ function CalendarChat({ personalEvents, teamEvents }: { personalEvents: Calendar
     }
   }, [calendarContext, messages, sending]);
 
-  return <aside className="flex min-h-[520px] flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#001f35]/80 xl:sticky xl:top-6 xl:max-h-[calc(100vh-3rem)]">
-    <div className="border-b border-white/10 px-5 py-4"><div className="flex items-center gap-2 text-bny-teal"><MessageCircle className="h-5 w-5" /><h2 className="font-semibold">Ask your calendar</h2></div><p className="mt-1 text-xs leading-5 text-bny-paper/55">Answers are based on the meetings in your selected date range.</p></div>
+  return <><button type="button" onClick={onToggle} className={`fixed right-0 top-28 z-30 hidden items-center gap-2 rounded-l-xl border border-r-0 border-white/15 bg-[#002c47] px-3 py-3 text-xs font-semibold text-bny-teal shadow-xl transition xl:flex ${isOpen ? 'translate-x-full' : 'translate-x-0'}`} aria-label="Open calendar chat"><PanelRightOpen className="h-4 w-4" /> Calendar chat</button><aside className={`fixed bottom-20 left-3 right-3 top-3 z-40 flex flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#001f35] shadow-2xl transition-transform duration-300 xl:bottom-4 xl:left-auto xl:right-4 xl:top-4 xl:w-[min(380px,calc(100vw-2rem))] ${isOpen ? 'translate-y-0 xl:translate-x-0' : 'translate-y-[calc(100%+6rem)] xl:translate-x-[calc(100%+2rem)]'}`} aria-hidden={!isOpen}>
+    <div className="flex items-start justify-between border-b border-white/10 px-5 py-4"><div><div className="flex items-center gap-2 text-bny-teal"><MessageCircle className="h-5 w-5" /><h2 className="font-semibold">Ask your calendar</h2></div><p className="mt-1 text-xs leading-5 text-bny-paper/55">Answers are based on the meetings in your selected date range.</p></div><button type="button" onClick={onToggle} className="rounded-lg p-2 text-bny-paper/55 transition hover:bg-white/10 hover:text-bny-teal" aria-label="Collapse calendar chat"><PanelRightClose className="h-4 w-4" /></button></div>
     <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-4">{messages.map((message, index) => <div key={`${message.role}-${index}`} className={`max-w-[92%] rounded-2xl px-3.5 py-3 text-sm leading-6 ${message.role === 'user' ? 'ml-auto bg-bny-teal text-bny-deep' : 'bg-white/[.07] text-bny-paper/80'}`}>{message.content}</div>)}{sending && <div className="w-fit rounded-2xl bg-white/[.07] px-3.5 py-3 text-sm text-bny-paper/60">Reviewing your calendar…</div>}</div>
     <div className="border-t border-white/10 p-4"><div className="mb-3 flex flex-wrap gap-2">{['Who am I meeting next week?', 'Which clients have the most meetings?', 'Summarize team client coverage.'].map((question) => <button key={question} type="button" disabled={sending} onClick={() => void ask(question)} className="rounded-full border border-white/10 px-2.5 py-1 text-[11px] text-bny-paper/65 transition hover:border-bny-teal/50 hover:text-bny-teal disabled:opacity-50">{question}</button>)}</div><form onSubmit={(event) => { event.preventDefault(); void ask(draft); }} className="flex items-end gap-2 rounded-xl border border-white/10 bg-bny-deep/50 p-2"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} rows={2} placeholder="Ask about your calendar…" className="min-h-12 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-bny-paper outline-none placeholder:text-bny-paper/35" /><button type="submit" disabled={!draft.trim() || sending} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-bny-teal text-bny-deep transition hover:bg-[#8adbe2] disabled:cursor-not-allowed disabled:opacity-45"><Send className="h-4 w-4" /><span className="sr-only">Send message</span></button></form></div>
-  </aside>;
+  </aside><button type="button" onClick={onToggle} className="fixed bottom-5 right-5 z-30 inline-flex items-center gap-2 rounded-full bg-bny-teal px-4 py-3 text-sm font-semibold text-bny-deep shadow-xl xl:hidden"><MessageCircle className="h-4 w-4" /> {isOpen ? 'Hide chat' : 'Ask your calendar'}</button></>;
 }
 
 export default function Home() {
@@ -292,6 +294,7 @@ export default function Home() {
   const [teamView, setTeamView] = useState<'meetings' | 'tracker'>('meetings');
   const [clientDirectory, setClientDirectory] = useState<ClientDirectory>({});
   const [shareStatus, setShareStatus] = useState('');
+  const [chatOpen, setChatOpen] = useState(true);
   const persist = useCallback((next: PersistedCalendars, syncTeam = false) => {
     saveCalendars(next);
     if (!syncTeam) return;
@@ -387,8 +390,7 @@ export default function Home() {
   }, [activeTab, personalView, rangeDays, search, teamView]);
 
   return <main className="min-h-screen px-4 py-5 sm:px-6 lg:px-10 lg:py-8">
-    <div className="mx-auto grid max-w-[1600px] gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-    <div className="min-w-0">
+    <div className={`mx-auto max-w-7xl transition-all xl:mr-auto ${chatOpen ? 'xl:pr-[404px]' : ''}`}>
       <header className="flex flex-col gap-6 border-b border-white/10 pb-7 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-4"><div className="flex h-14 w-20 items-center justify-center rounded-xl border border-white/10 bg-white/[.06] px-2"><Image src="/bny-logo.svg" alt="BNY" width={160} height={48} className="h-auto w-full" priority /></div><div><p className="text-[11px] font-bold uppercase tracking-[.22em] text-bny-teal">Workplace automation</p><h1 className="mt-1 text-xl font-semibold tracking-tight text-bny-paper sm:text-2xl">Client Meeting Intelligence</h1></div></div>
       </header>
@@ -410,8 +412,7 @@ export default function Home() {
       </div>}</section>
 
       <footer className="mt-10 flex items-center justify-between border-t border-white/10 py-5 text-xs text-bny-paper/40"><span>Client Meeting Intelligence</span><span className="flex items-center gap-1">Built for calendar visibility <ChevronRight className="h-3 w-3" /></span></footer>
-    </div>
-    <CalendarChat personalEvents={personalEvents} teamEvents={teamEvents} />
+    <CalendarChat personalEvents={personalEvents} teamEvents={teamEvents} isOpen={chatOpen} onToggle={() => setChatOpen((open) => !open)} />
     </div>
   </main>;
 }
