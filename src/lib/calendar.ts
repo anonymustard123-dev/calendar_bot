@@ -32,7 +32,20 @@ function isExternalEmail(email: string | null): email is string {
 }
 
 export function friendlyOwner(filename: string) {
-  return filename.replace(/\.(ics|txt)$/i, '').replace(/[-_]+/g, ' ').trim() || 'Team member';
+  let decoded = filename;
+  try {
+    decoded = decodeURIComponent(filename);
+  } catch {
+    // Use the original filename if it contains an invalid percent-escape.
+  }
+  const owner = decoded
+    .replace(/\.(ics|txt)$/i, '')
+    .replace(/%20/gi, ' ')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b(calendar|dummy|client|meeting|meetings|export|v\d+|\d{10,})\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return owner || 'Team member';
 }
 
 function externalAttendeesFor(event: ICAL.Event) {
@@ -102,7 +115,7 @@ export function parseCalendar(text: string, owner: string, referenceDate = new D
 }
 
 export function reviveCalendar(calendar: StoredCalendar): UploadedCalendar {
-  const owner = calendar.owner || calendar.events[0]?.owner || friendlyOwner(calendar.name);
+  const owner = friendlyOwner(calendar.owner || calendar.events[0]?.owner || calendar.name);
   return {
     ...calendar,
     owner,
