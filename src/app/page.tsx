@@ -9,10 +9,12 @@ import {
   CheckCircle2,
   ChevronRight,
   Clock3,
+  Download,
   FileUp,
   Globe2,
   MessageCircle,
   Send,
+  Share2,
   UploadCloud,
   UsersRound,
   X,
@@ -22,7 +24,9 @@ type UploadResult = { calendars: UploadedCalendar[]; errors: string[] };
 type TeamWorkspaceRow = { calendars?: StoredCalendar[] };
 
 const STORAGE_KEY = 'bny-client-meeting-intelligence-v1';
+const CLIENT_DIRECTORY_KEY = 'bny-client-directory-v1';
 type PersistedCalendars = { personal: UploadedCalendar | null; team: UploadedCalendar[] };
+type ClientDirectory = Record<string, { name: string; aliases: string[] }>;
 const EMPTY_PERSISTED_CALENDARS: PersistedCalendars = { personal: null, team: [] };
 const calendarListeners = new Set<() => void>();
 let storedCalendars: PersistedCalendars | undefined;
@@ -174,16 +178,58 @@ function ClientTrackerRows({ clients }: { clients: ClientGroup[] }) {
   </div>;
 }
 
+function csvCell(value: string) {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function downloadClientCsv(clients: ClientGroup[], directory: ClientDirectory, filename: string) {
+  const header = ['Client', 'Aliases', 'Client contacts', 'BNY team', 'Next conversation', 'Upcoming meetings'];
+  const rows = clients.map((client) => {
+    const profile = directory[client.domain];
+    const next = client.events[0];
+    return [profile?.name || client.domain, (profile?.aliases ?? []).join('; '), [...client.contacts].join('; '), [...client.owners].join('; '), `${formatDate(next.start)} ${formatTime(next.start)} — ${next.title}`, String(client.events.length)];
+  });
+  const blob = new Blob([[header, ...rows].map((row) => row.map(csvCell).join(',')).join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function EditableClientTracker({ events, directory, onDirectoryChange, filename }: { events: CalendarEvent[]; directory: ClientDirectory; onDirectoryChange: (domain: string, value: { name: string; aliases: string[] }) => void; filename: string }) {
+  const clients = useMemo(() => {
+    const grouped = new Map<string, ClientGroup>();
+    events.forEach((event) => event.externalAttendees.forEach((email) => {
+      const domain = email.split('@')[1]?.toLowerCase() || email.toLowerCase();
+      const client = grouped.get(domain) ?? { domain, contacts: new Set<string>(), owners: new Set<string>(), events: [] };
+      client.contacts.add(email);
+      client.owners.add(event.owner);
+      if (!client.events.some((meeting) => meeting.id === event.id)) client.events.push(event);
+      grouped.set(domain, client);
+    }));
+    return [...grouped.values()].map((client) => ({ ...client, events: client.events.sort((a, b) => a.start.getTime() - b.start.getTime()) })).sort((a, b) => a.events[0].start.getTime() - b.events[0].start.getTime());
+  }, [events]);
+
+  if (!clients.length) return <div className="rounded-2xl border border-white/10 bg-white/[0.035] px-6 py-12 text-center"><UsersRound className="mx-auto h-7 w-7 text-bny-teal/60" /><p className="mt-3 text-sm font-semibold text-bny-paper">No client relationships found</p><p className="mt-1 text-xs text-bny-paper/55">Upload a calendar or expand the selected date range.</p></div>;
+  return <div className="overflow-hidden rounded-2xl border border-white/10 bg-[#002c47]/65"><div className="flex items-center justify-between border-b border-white/10 px-5 py-3"><p className="text-xs text-bny-paper/55">Client names and aliases are saved in this browser.</p><button type="button" onClick={() => downloadClientCsv(clients, directory, filename)} className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-bny-paper/75 transition hover:border-bny-teal/50 hover:text-bny-teal"><Download className="h-3.5 w-3.5" /> Export CSV</button></div><div className="hidden grid-cols-[minmax(130px,.8fr)_minmax(170px,1.25fr)_minmax(115px,.8fr)_minmax(145px,1fr)_100px] gap-4 border-b border-white/10 px-5 py-3 text-[11px] font-bold uppercase tracking-[.16em] text-bny-paper/45 lg:grid"><span>Client</span><span>Client contacts</span><span>BNY team</span><span>Next conversation</span><span>Upcoming</span></div><div className="divide-y divide-white/10">{clients.map((client) => { const profile = directory[client.domain] ?? { name: client.domain.replace(/\.[^.]+$/, ''), aliases: [] }; const next = client.events[0]; return <article key={client.domain} className="grid gap-4 px-5 py-5 lg:grid-cols-[minmax(130px,.8fr)_minmax(170px,1.25fr)_minmax(115px,.8fr)_minmax(145px,1fr)_100px] lg:items-start"><div className="min-w-0"><label className="text-[10px] font-bold uppercase tracking-[.14em] text-bny-paper/45">Client name<input value={profile.name} onChange={(event) => onDirectoryChange(client.domain, { ...profile, name: event.target.value })} className="mt-1.5 w-full rounded-lg border border-white/10 bg-bny-deep/45 px-2.5 py-2 text-sm font-semibold normal-case tracking-normal text-bny-paper outline-none focus:border-bny-teal" /></label><label className="mt-2 block text-[10px] font-bold uppercase tracking-[.14em] text-bny-paper/45">Aliases<input value={profile.aliases.join(', ')} onChange={(event) => onDirectoryChange(client.domain, { ...profile, aliases: event.target.value.split(',').map((alias) => alias.trim()).filter(Boolean) })} placeholder="e.g. Acme, ACME Capital" className="mt-1.5 w-full rounded-lg border border-white/10 bg-bny-deep/45 px-2.5 py-2 text-xs normal-case tracking-normal text-bny-paper outline-none placeholder:text-bny-paper/30 focus:border-bny-teal" /></label></div><div className="min-w-0"><p className="mb-1.5 text-[10px] font-bold uppercase tracking-[.14em] text-bny-paper/45 lg:hidden">Client contacts</p><div className="flex flex-wrap gap-1.5">{[...client.contacts].map((contact) => <span key={contact} className="max-w-full break-all rounded-full border border-bny-gold/35 bg-bny-gold/10 px-2.5 py-1 text-xs text-[#f0d89a]">{contact}</span>)}</div></div><div className="min-w-0 text-sm text-bny-paper/75"><p className="mb-1.5 text-[10px] font-bold uppercase tracking-[.14em] text-bny-paper/45 lg:hidden">BNY team</p><p className="break-words">{[...client.owners].join(', ')}</p></div><div className="min-w-0"><p className="mb-1.5 text-[10px] font-bold uppercase tracking-[.14em] text-bny-paper/45 lg:hidden">Next conversation</p><p className="text-sm font-medium text-bny-paper">{formatDate(next.start)}</p><p className="mt-1 break-words text-xs leading-5 text-bny-teal">{formatTime(next.start)} · {next.title}</p></div><div><p className="mb-1.5 text-[10px] font-bold uppercase tracking-[.14em] text-bny-paper/45 lg:hidden">Upcoming</p><span className="inline-flex whitespace-nowrap rounded-full bg-bny-teal/15 px-2.5 py-1 text-xs font-semibold text-bny-teal">{client.events.length} meeting{client.events.length === 1 ? '' : 's'}</span></div></article>; })}</div></div>;
+}
+
 function CalendarControls({
   rangeDays,
   search,
   onRangeChange,
   onSearchChange,
+  onShare,
+  shareStatus,
 }: {
   rangeDays: 7 | 30 | 90;
   search: string;
   onRangeChange: (days: 7 | 30 | 90) => void;
   onSearchChange: (value: string) => void;
+  onShare: () => void;
+  shareStatus: string;
 }) {
   return <div className="mt-5 flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/[.035] p-3 sm:flex-row sm:items-center sm:justify-between">
     <div className="flex max-w-full items-center gap-1 overflow-x-auto rounded-xl bg-bny-deep/70 p-1" aria-label="Date range">
@@ -194,6 +240,7 @@ function CalendarControls({
       <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0 fill-none stroke-current stroke-2"><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>
       <input value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="Search title or attendee" className="min-w-0 flex-1 bg-transparent text-sm text-bny-paper outline-none placeholder:text-bny-paper/35" />
     </label>
+    <button type="button" onClick={onShare} className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-xs font-semibold text-bny-paper/70 transition hover:border-bny-teal/50 hover:text-bny-teal"><Share2 className="h-3.5 w-3.5" />{shareStatus || 'Share view'}</button>
   </div>;
 }
 
@@ -243,6 +290,8 @@ export default function Home() {
   const [search, setSearch] = useState('');
   const [personalView, setPersonalView] = useState<'meetings' | 'tracker'>('meetings');
   const [teamView, setTeamView] = useState<'meetings' | 'tracker'>('meetings');
+  const [clientDirectory, setClientDirectory] = useState<ClientDirectory>({});
+  const [shareStatus, setShareStatus] = useState('');
   const persist = useCallback((next: PersistedCalendars, syncTeam = false) => {
     saveCalendars(next);
     if (!syncTeam) return;
@@ -263,6 +312,24 @@ export default function Home() {
     }
     void hydrateTeam();
     return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(CLIENT_DIRECTORY_KEY);
+      if (saved) setClientDirectory(JSON.parse(saved) as ClientDirectory);
+    } catch { /* Start with an empty client directory when storage is invalid. */ }
+    const params = new URLSearchParams(window.location.search);
+    const tab = params.get('tab');
+    const range = Number(params.get('range'));
+    const view = params.get('view');
+    if (tab === 'personal' || tab === 'team') setActiveTab(tab);
+    if (range === 7 || range === 30 || range === 90) setRangeDays(range);
+    if (params.get('search')) setSearch(params.get('search') ?? '');
+    if (view === 'meetings' || view === 'tracker') {
+      if (tab === 'team') setTeamView(view);
+      else setPersonalView(view);
+    }
   }, []);
 
   const filterEvents = useCallback((events: CalendarEvent[]) => {
@@ -295,6 +362,29 @@ export default function Home() {
     const current = readStoredCalendars();
     persist({ ...current, team: current.team.map((calendar) => calendar.id === id ? { ...calendar, owner, events: calendar.events.map((event) => ({ ...event, owner })) } : calendar) }, true);
   }, [persist]);
+  const updateClientDirectory = useCallback((domain: string, value: { name: string; aliases: string[] }) => {
+    setClientDirectory((current) => {
+      const next = { ...current, [domain]: value };
+      window.localStorage.setItem(CLIENT_DIRECTORY_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+  const shareView = useCallback(async () => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('tab', activeTab);
+    url.searchParams.set('range', String(rangeDays));
+    url.searchParams.set('view', activeTab === 'team' ? teamView : personalView);
+    if (search.trim()) url.searchParams.set('search', search.trim());
+    else url.searchParams.delete('search');
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      setShareStatus('Link copied');
+    } catch {
+      window.prompt('Copy this shareable view link:', url.toString());
+      setShareStatus('Link ready');
+    }
+    window.setTimeout(() => setShareStatus(''), 2500);
+  }, [activeTab, personalView, rangeDays, search, teamView]);
 
   return <main className="min-h-screen px-4 py-5 sm:px-6 lg:px-10 lg:py-8">
     <div className="mx-auto grid max-w-[1600px] gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -307,16 +397,16 @@ export default function Home() {
         {([{ key: 'personal', label: 'My Calendar', icon: CalendarDays }, { key: 'team', label: 'Team Calendars', icon: UsersRound }] as const).map(({ key, label, icon: Icon }) => <button key={key} type="button" role="tab" aria-selected={activeTab === key} onClick={() => setActiveTab(key)} className={`flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-semibold transition ${activeTab === key ? 'border-bny-teal text-bny-teal' : 'border-transparent text-bny-paper/55 hover:text-bny-paper'}`}><Icon className="h-4 w-4" />{label}</button>)}
       </div>
 
-      <CalendarControls rangeDays={rangeDays} search={search} onRangeChange={setRangeDays} onSearchChange={setSearch} />
+      <CalendarControls rangeDays={rangeDays} search={search} onRangeChange={setRangeDays} onSearchChange={setSearch} onShare={() => void shareView()} shareStatus={shareStatus} />
 
       {errors.length > 0 && <div className="mt-5 flex items-start gap-3 rounded-xl border border-red-300/25 bg-red-400/10 p-4 text-sm text-red-100"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><div>{errors.map((error) => <p key={error}>{error}</p>)}</div><button type="button" onClick={() => setErrors([])} className="ml-auto"><X className="h-4 w-4" /></button></div>}
 
       {activeTab === 'personal' ? <div className="mt-6 grid gap-6 lg:grid-cols-[360px_1fr]">
         <aside><div className="rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><div className="flex items-center gap-2 text-bny-teal"><Globe2 className="h-5 w-5" /><h2 className="font-semibold">Personal calendar</h2></div><div className="mt-5"><UploadZone onUpload={uploadPersonal} /></div>{personal && <div className="mt-4 flex items-center justify-between rounded-xl bg-white/[.05] p-3 text-xs"><span className="max-w-56 truncate text-bny-paper/70">{personal.name}</span><button type="button" onClick={() => saveCalendars({ ...readStoredCalendars(), personal: null })} className="text-bny-teal hover:text-white">Remove</button></div>}</div></aside>
-        <div><div className="mb-4 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><p className="text-xs font-bold uppercase tracking-[.17em] text-bny-teal">Upcoming meetings</p><h2 className="mt-1 text-xl font-semibold">{personalView === 'tracker' ? 'My client meeting tracker' : 'My external client meetings'}</h2></div><div className="flex items-center gap-3"><div className="flex rounded-xl border border-white/10 bg-bny-deep/50 p-1"><button type="button" onClick={() => setPersonalView('meetings')} className={`rounded-lg px-3 py-2 text-xs font-semibold ${personalView === 'meetings' ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/60 hover:text-bny-paper'}`}>Meetings</button><button type="button" onClick={() => setPersonalView('tracker')} className={`rounded-lg px-3 py-2 text-xs font-semibold ${personalView === 'tracker' ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/60 hover:text-bny-paper'}`}>Client tracker</button></div>{personal && <span className="hidden items-center gap-1.5 text-xs text-bny-paper/60 sm:flex"><CheckCircle2 className="h-4 w-4 text-bny-teal" /> Filter active</span>}</div></div>{personalView === 'tracker' ? <ClientTracker events={personalEvents} /> : <EventList events={personalEvents} />}</div>
+        <div><div className="mb-4 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><p className="text-xs font-bold uppercase tracking-[.17em] text-bny-teal">Upcoming meetings</p><h2 className="mt-1 text-xl font-semibold">{personalView === 'tracker' ? 'My client meeting tracker' : 'My external client meetings'}</h2></div><div className="flex items-center gap-3"><div className="flex rounded-xl border border-white/10 bg-bny-deep/50 p-1"><button type="button" onClick={() => setPersonalView('meetings')} className={`rounded-lg px-3 py-2 text-xs font-semibold ${personalView === 'meetings' ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/60 hover:text-bny-paper'}`}>Meetings</button><button type="button" onClick={() => setPersonalView('tracker')} className={`rounded-lg px-3 py-2 text-xs font-semibold ${personalView === 'tracker' ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/60 hover:text-bny-paper'}`}>Client tracker</button></div>{personal && <span className="hidden items-center gap-1.5 text-xs text-bny-paper/60 sm:flex"><CheckCircle2 className="h-4 w-4 text-bny-teal" /> Filter active</span>}</div></div>{personalView === 'tracker' ? <EditableClientTracker events={personalEvents} directory={clientDirectory} onDirectoryChange={updateClientDirectory} filename="my-client-tracker.csv" /> : <EventList events={personalEvents} />}</div>
       </div> : <div className="mt-6 grid gap-6 lg:grid-cols-[360px_1fr]">
         <aside><div className="rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><div className="flex items-center gap-2 text-bny-teal"><UsersRound className="h-5 w-5" /><h2 className="font-semibold">Team calendar files</h2></div><div className="mt-5"><UploadZone multiple onUpload={uploadTeam} /></div>{team.length > 0 && <div className="mt-4 space-y-3">{team.map((calendar) => <div key={calendar.id} className="rounded-xl bg-white/[.05] p-3 text-xs"><p className="mb-2 truncate text-bny-paper/50">{calendar.name}</p><label className="block text-[10px] font-bold uppercase tracking-[.14em] text-bny-paper/45">Calendar owner<input value={calendar.owner} onChange={(event) => updateTeamOwner(calendar.id, event.target.value)} placeholder="Team member name" className="mt-1.5 w-full rounded-lg border border-white/10 bg-bny-deep/50 px-2.5 py-2 text-sm normal-case tracking-normal text-bny-paper outline-none placeholder:text-bny-paper/30 focus:border-bny-teal" /></label><button type="button" onClick={() => { const current = readStoredCalendars(); persist({ ...current, team: current.team.filter((item) => item.id !== calendar.id) }, true); }} className="mt-3 text-bny-teal hover:text-white">Remove</button></div>)}</div>}</div></aside>
-        <div><div className="mb-4 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><p className="text-xs font-bold uppercase tracking-[.17em] text-bny-teal">Team overview</p><h2 className="mt-1 text-xl font-semibold">{teamView === 'tracker' ? 'Client meeting tracker' : 'All external client meetings'}</h2></div><div className="flex items-center gap-3"><div className="flex rounded-xl border border-white/10 bg-bny-deep/50 p-1"><button type="button" onClick={() => setTeamView('meetings')} className={`rounded-lg px-3 py-2 text-xs font-semibold ${teamView === 'meetings' ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/60 hover:text-bny-paper'}`}>Meetings</button><button type="button" onClick={() => setTeamView('tracker')} className={`rounded-lg px-3 py-2 text-xs font-semibold ${teamView === 'tracker' ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/60 hover:text-bny-paper'}`}>Client tracker</button></div><span className="hidden items-center gap-1.5 text-xs text-bny-paper/60 sm:flex"><Clock3 className="h-4 w-4 text-bny-teal" /> Chronological</span></div></div>{teamView === 'tracker' ? <ClientTracker events={teamEvents} /> : <EventList events={teamEvents} showOwner />}</div>
+        <div><div className="mb-4 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><p className="text-xs font-bold uppercase tracking-[.17em] text-bny-teal">Team overview</p><h2 className="mt-1 text-xl font-semibold">{teamView === 'tracker' ? 'Client meeting tracker' : 'All external client meetings'}</h2></div><div className="flex items-center gap-3"><div className="flex rounded-xl border border-white/10 bg-bny-deep/50 p-1"><button type="button" onClick={() => setTeamView('meetings')} className={`rounded-lg px-3 py-2 text-xs font-semibold ${teamView === 'meetings' ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/60 hover:text-bny-paper'}`}>Meetings</button><button type="button" onClick={() => setTeamView('tracker')} className={`rounded-lg px-3 py-2 text-xs font-semibold ${teamView === 'tracker' ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/60 hover:text-bny-paper'}`}>Client tracker</button></div><span className="hidden items-center gap-1.5 text-xs text-bny-paper/60 sm:flex"><Clock3 className="h-4 w-4 text-bny-teal" /> Chronological</span></div></div>{teamView === 'tracker' ? <EditableClientTracker events={teamEvents} directory={clientDirectory} onDirectoryChange={updateClientDirectory} filename="team-client-tracker.csv" /> : <EventList events={teamEvents} showOwner />}</div>
       </div>}</section>
 
       <footer className="mt-10 flex items-center justify-between border-t border-white/10 py-5 text-xs text-bny-paper/40"><span>Client Meeting Intelligence</span><span className="flex items-center gap-1">Built for calendar visibility <ChevronRight className="h-3 w-3" /></span></footer>
