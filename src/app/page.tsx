@@ -242,6 +242,9 @@ function CalendarControls({
   onSearchChange,
   onShare,
   shareStatus,
+  teamOwners,
+  selectedTeamOwner,
+  onTeamOwnerChange,
 }: {
   rangeDays: 7 | 30 | 90;
   search: string;
@@ -249,6 +252,9 @@ function CalendarControls({
   onSearchChange: (value: string) => void;
   onShare: () => void;
   shareStatus: string;
+  teamOwners?: string[];
+  selectedTeamOwner?: string;
+  onTeamOwnerChange?: (owner: string) => void;
 }) {
   return <div className="mt-5 flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/[.035] p-3 sm:flex-row sm:items-center sm:justify-between">
     <div className="flex max-w-full items-center gap-1 overflow-x-auto rounded-xl bg-bny-deep/70 p-1" aria-label="Date range">
@@ -259,6 +265,7 @@ function CalendarControls({
       <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0 fill-none stroke-current stroke-2"><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>
       <input value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="Search title or attendee" className="min-w-0 flex-1 bg-transparent text-sm text-bny-paper outline-none placeholder:text-bny-paper/35" />
     </label>
+    {teamOwners && teamOwners.length > 0 && <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-bny-deep/40 px-3 py-2 text-xs text-bny-paper/55"><span className="whitespace-nowrap">Team member</span><select value={selectedTeamOwner} onChange={(event) => onTeamOwnerChange?.(event.target.value)} className="min-w-0 bg-transparent text-xs font-semibold text-bny-paper outline-none"><option value="all" className="bg-bny-deep">All members</option>{teamOwners.map((owner) => <option key={owner} value={owner} className="bg-bny-deep">{owner}</option>)}</select></label>}
     <button type="button" onClick={onShare} className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-xs font-semibold text-bny-paper/70 transition hover:border-bny-teal/50 hover:text-bny-teal"><Share2 className="h-3.5 w-3.5" />{shareStatus || 'Share view'}</button>
   </div>;
 }
@@ -266,13 +273,26 @@ function CalendarControls({
 type ChatMessage = { role: 'user' | 'assistant'; content: string };
 
 function ChatResponse({ content }: { content: string }) {
-  return <div className="space-y-2">{content.split('\n').filter(Boolean).map((line, index) => {
-    const trimmed = line.trim();
-    if (/^#{1,3}\s/.test(trimmed)) return <p key={index} className="font-semibold text-bny-paper">{trimmed.replace(/^#{1,3}\s/, '')}</p>;
-    if (/^[-*]\s/.test(trimmed)) return <div key={index} className="flex gap-2"><span className="text-bny-teal">•</span><span>{trimmed.replace(/^[-*]\s/, '')}</span></div>;
-    if (/^\d+\.\s/.test(trimmed)) return <div key={index} className="flex gap-2"><span className="text-bny-teal">{trimmed.match(/^\d+/)?.[0]}.</span><span>{trimmed.replace(/^\d+\.\s/, '')}</span></div>;
-    return <p key={index}>{trimmed}</p>;
-  })}</div>;
+  const lines = content.split('\n').filter((line) => line.trim());
+  const rows = (line: string) => line.trim().replace(/^\||\|$/g, '').split('|').map((cell) => cell.trim());
+  const rendered: React.ReactNode[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (line.includes('|') && /^\s*\|?\s*:?-{3,}/.test(lines[index + 1] ?? '')) {
+      const headings = rows(line);
+      const body: string[][] = [];
+      index += 2;
+      while (index < lines.length && lines[index].includes('|')) { body.push(rows(lines[index])); index += 1; }
+      index -= 1;
+      rendered.push(<div key={`table-${index}`} className="overflow-x-auto rounded-xl border border-white/10"><table className="w-full min-w-[310px] text-left text-xs"><thead className="bg-white/[.06] text-bny-paper/65"><tr>{headings.map((heading) => <th key={heading} className="px-3 py-2 font-semibold">{heading}</th>)}</tr></thead><tbody className="divide-y divide-white/10">{body.map((row, rowIndex) => <tr key={rowIndex}>{headings.map((_, cellIndex) => <td key={cellIndex} className="px-3 py-2 align-top leading-5 text-bny-paper/80">{row[cellIndex] ?? ''}</td>)}</tr>)}</tbody></table></div>);
+      continue;
+    }
+    if (/^#{1,3}\s/.test(line)) rendered.push(<p key={index} className="font-semibold text-bny-paper">{line.replace(/^#{1,3}\s/, '')}</p>);
+    else if (/^[-*]\s/.test(line)) rendered.push(<div key={index} className="flex gap-2"><span className="text-bny-teal">•</span><span>{line.replace(/^[-*]\s/, '')}</span></div>);
+    else if (/^\d+\.\s/.test(line)) rendered.push(<div key={index} className="flex gap-2"><span className="text-bny-teal">{line.match(/^\d+/)?.[0]}.</span><span>{line.replace(/^\d+\.\s/, '')}</span></div>);
+    else rendered.push(<p key={index}>{line}</p>);
+  }
+  return <div className="space-y-2">{rendered}</div>;
 }
 
 function CalendarChat({ personalEvents, teamEvents, personalUploaded, isOpen, onToggle }: { personalEvents: CalendarEvent[]; teamEvents: CalendarEvent[]; personalUploaded: boolean; isOpen: boolean; onToggle: () => void }) {
@@ -328,6 +348,7 @@ export default function Home() {
   const [clientDirectory, setClientDirectory] = useState<ClientDirectory>({});
   const [shareStatus, setShareStatus] = useState('');
   const [chatOpen, setChatOpen] = useState(true);
+  const [selectedTeamOwner, setSelectedTeamOwner] = useState('all');
   const persist = useCallback((next: PersistedCalendars, syncTeam = false) => {
     saveCalendars(next);
     if (!syncTeam) return;
@@ -381,7 +402,13 @@ export default function Home() {
   }, [rangeDays, search]);
 
   const personalEvents = useMemo(() => filterEvents(personal?.events ?? []), [filterEvents, personal]);
-  const teamEvents = useMemo(() => filterEvents(team.flatMap((calendar) => calendar.events)), [filterEvents, team]);
+  const allTeamEvents = useMemo(() => filterEvents(team.flatMap((calendar) => calendar.events)), [filterEvents, team]);
+  const teamOwners = useMemo(() => [...new Set(allTeamEvents.map((event) => event.owner).filter(Boolean))].sort(), [allTeamEvents]);
+  const teamEvents = useMemo(() => selectedTeamOwner === 'all' ? allTeamEvents : allTeamEvents.filter((event) => event.owner === selectedTeamOwner), [allTeamEvents, selectedTeamOwner]);
+
+  useEffect(() => {
+    if (selectedTeamOwner !== 'all' && !teamOwners.includes(selectedTeamOwner)) setSelectedTeamOwner('all');
+  }, [selectedTeamOwner, teamOwners]);
 
   const uploadPersonal = useCallback(async (files: FileList | File[]) => {
     const result = await readCalendars(files);
@@ -432,7 +459,7 @@ export default function Home() {
         {([{ key: 'personal', label: 'My Calendar', icon: CalendarDays }, { key: 'team', label: 'Team Calendars', icon: UsersRound }] as const).map(({ key, label, icon: Icon }) => <button key={key} type="button" role="tab" aria-selected={activeTab === key} onClick={() => setActiveTab(key)} className={`flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-semibold transition ${activeTab === key ? 'border-bny-teal text-bny-teal' : 'border-transparent text-bny-paper/55 hover:text-bny-paper'}`}><Icon className="h-4 w-4" />{label}</button>)}
       </div>
 
-      <CalendarControls rangeDays={rangeDays} search={search} onRangeChange={setRangeDays} onSearchChange={setSearch} onShare={() => void shareView()} shareStatus={shareStatus} />
+      <CalendarControls rangeDays={rangeDays} search={search} onRangeChange={setRangeDays} onSearchChange={setSearch} onShare={() => void shareView()} shareStatus={shareStatus} teamOwners={activeTab === 'team' && teamView === 'tracker' ? teamOwners : undefined} selectedTeamOwner={selectedTeamOwner} onTeamOwnerChange={setSelectedTeamOwner} />
 
       {errors.length > 0 && <div className="mt-5 flex items-start gap-3 rounded-xl border border-red-300/25 bg-red-400/10 p-4 text-sm text-red-100"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><div>{errors.map((error) => <p key={error}>{error}</p>)}</div><button type="button" onClick={() => setErrors([])} className="ml-auto"><X className="h-4 w-4" /></button></div>}
 
