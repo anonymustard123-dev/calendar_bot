@@ -160,6 +160,15 @@ function parseCsv(text: string) {
   row.push(cell); if (row.some(Boolean)) rows.push(row); return rows;
 }
 
+function localInboxActions(emails: Array<{ subject: string; body: string; from: string; importance?: string }>): InboxAction[] {
+  const actionSignal = /\b(please|need|needed|action|required|respond|reply|review|approve|confirm|send|due|deadline|by\s+(?:eod|end of day|tomorrow|monday|tuesday|wednesday|thursday|friday|\d))/i;
+  const candidates = emails.filter((email) => actionSignal.test(`${email.subject}\n${email.body}`));
+  return (candidates.length ? candidates : emails).slice(0, 20).map((email) => {
+    const text = `${email.subject}\n${email.body}`;
+    return { title: email.subject || 'Review email', deadline: text.match(/\b(?:due|by|before)\s+([^\n.;]{2,60})/i)?.[0] || 'No stated deadline', priority: /\b(urgent|asap|critical|eod|today)\b/i.test(text) ? 'high' : 'medium', from: email.from || 'Unknown sender', context: email.body.replace(/\s+/g, ' ').slice(0, 220) || 'Review this email for the requested action.' };
+  });
+}
+
 function InboxActionCenter() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [actions, setActions] = useState<InboxAction[]>([]);
@@ -167,6 +176,7 @@ function InboxActionCenter() {
   const [status, setStatus] = useState('');
   const upload = useCallback(async (file?: File) => {
     if (!file) return;
+    let emails: Array<{ subject: string; body: string; from: string; importance?: string }> = [];
     setStatus('Reading mailbox…');
     try {
       const rows = parseCsv(await file.text()); const headers = rows.shift()?.map((value) => value.trim());
@@ -174,12 +184,12 @@ function InboxActionCenter() {
       const column = (name: string) => headers.findIndex((header) => header.toLowerCase() === name.toLowerCase());
       const subject = column('Subject'); const body = column('Body'); const sender = column('From: (Name)'); const importance = column('Importance');
       if (subject < 0 || body < 0) throw new Error('Mailbox CSV must contain Subject and Body columns.');
-      const emails = rows.map((row) => ({ subject: row[subject] || '', body: row[body] || '', from: sender >= 0 ? row[sender] || '' : '', importance: importance >= 0 ? row[importance] || '' : '' })).filter((email) => email.subject || email.body);
+      emails = rows.map((row) => ({ subject: row[subject] || '', body: row[body] || '', from: sender >= 0 ? row[sender] || '' : '', importance: importance >= 0 ? row[importance] || '' : '' })).filter((email) => email.subject || email.body);
       setStatus('Finding outstanding actions…');
       const response = await fetch('/api/inbox-actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emails }) });
       const result = await response.json().catch(() => ({})); if (!response.ok) throw new Error(result.error || 'Could not analyze mailbox.');
       setActions(result.actions ?? []); setSummary(result.summary ?? ''); setStatus(result.notice || `${result.actions?.length ?? 0} outstanding items found`);
-    } catch (error) { setStatus(error instanceof Error ? error.message : 'Could not read mailbox.'); }
+    } catch (error) { const fallback = localInboxActions(emails); if (fallback.length > 0) { setActions(fallback); setSummary('AI analysis was unavailable, so locally extracted action candidates are shown.'); setStatus(error instanceof Error ? `${error.message} Showing local action candidates.` : 'Showing local action candidates.'); } else setStatus(error instanceof Error ? error.message : 'Could not read mailbox.'); }
   }, []);
   return <section className="mt-5 rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><input ref={inputRef} type="file" accept=".csv,text/csv" className="hidden" onChange={(event) => void upload(event.target.files?.[0])} /><div className="flex items-center justify-between gap-4"><div className="flex items-center gap-2 text-bny-teal"><Mail className="h-5 w-5" /><h2 className="font-semibold">Inbox action center</h2></div><button type="button" onClick={() => inputRef.current?.click()} className="rounded-xl bg-bny-teal px-3 py-2 text-xs font-bold text-bny-deep">Upload mailbox CSV</button></div>{status && <p className="mt-3 text-xs text-bny-paper/55">{status}</p>}{summary && <p className="mt-3 rounded-xl bg-white/[.05] p-3 text-sm leading-6 text-bny-paper/80">{summary}</p>}{actions.length > 0 && <div className="mt-4 space-y-2">{actions.map((action, index) => <article key={`${action.title}-${index}`} className="rounded-xl border border-white/10 bg-white/[.035] p-3"><div className="flex items-start justify-between gap-3"><p className="text-sm font-semibold text-bny-paper">{action.title}</p><span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase ${action.priority === 'high' ? 'bg-red-400/15 text-red-200' : action.priority === 'medium' ? 'bg-bny-gold/15 text-[#f0d89a]' : 'bg-bny-teal/15 text-bny-teal'}`}>{action.priority}</span></div><p className="mt-2 text-xs text-bny-teal">{action.deadline}</p><p className="mt-2 text-xs leading-5 text-bny-paper/60">{action.context}</p><p className="mt-2 text-[11px] text-bny-paper/40">{action.from}</p></article>)}</div>}</section>;
 }
@@ -555,7 +565,7 @@ export default function Home() {
   }, [activeTab, personalView, rangeDays, search, teamView]);
 
   return <main className="min-h-screen px-4 py-5 sm:px-6 lg:px-10 lg:py-8">
-    <div className={`mx-auto max-w-7xl transition-all xl:mr-auto ${chatOpen ? 'xl:pr-[404px]' : ''}`}>
+    <div className={`mx-auto max-w-[1800px] transition-all xl:mr-auto ${chatOpen ? 'xl:pr-[420px]' : ''}`}>
       <header className="flex flex-col gap-6 border-b border-white/10 pb-7 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-4"><div className="flex h-14 w-20 items-center justify-center rounded-xl border border-white/10 bg-white/[.06] px-2"><Image src="/bny-logo.svg" alt="BNY" width={160} height={48} className="h-auto w-full" priority /></div><h1 className="text-xl font-semibold tracking-tight text-bny-paper sm:text-2xl">Client Meeting Intelligence</h1></div>
       </header>
