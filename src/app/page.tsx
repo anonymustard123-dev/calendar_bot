@@ -28,6 +28,7 @@ import {
 
 type UploadResult = { calendars: UploadedCalendar[]; errors: string[] };
 type TeamWorkspaceRow = { calendars?: StoredCalendar[] };
+type ClientProfileWorkspaceRow = { profiles?: ClientDirectory };
 
 const STORAGE_KEY = 'bny-client-meeting-intelligence-v1';
 const CLIENT_DIRECTORY_KEY = 'bny-client-directory-v1';
@@ -81,6 +82,21 @@ async function saveSharedTeamCalendars(team: UploadedCalendar[]) {
   });
   if (response.status === 503) return false;
   if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Could not save team calendars.');
+  return true;
+}
+
+async function fetchSharedClientProfiles(): Promise<ClientDirectory | null> {
+  const response = await fetch('/api/supabase/rest/v1/calendar_client_profiles?workspace_key=eq.team-calendars&select=profiles', { cache: 'no-store' });
+  if (response.status === 503 || response.status === 404) return null;
+  if (!response.ok) throw new Error('Could not load shared client profiles.');
+  const rows = await response.json() as ClientProfileWorkspaceRow[];
+  return rows[0]?.profiles ?? {};
+}
+
+async function saveSharedClientProfiles(profiles: ClientDirectory) {
+  const response = await fetch('/api/supabase/rest/v1/calendar_client_profiles?on_conflict=workspace_key', { method: 'POST', headers: { 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify({ workspace_key: 'team-calendars', profiles }) });
+  if (response.status === 503 || response.status === 404) return false;
+  if (!response.ok) throw new Error('Could not save shared client profiles.');
   return true;
 }
 
@@ -162,7 +178,7 @@ function InboxActionCenter() {
       setStatus('Finding outstanding actions…');
       const response = await fetch('/api/inbox-actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emails }) });
       const result = await response.json().catch(() => ({})); if (!response.ok) throw new Error(result.error || 'Could not analyze mailbox.');
-      setActions(result.actions ?? []); setSummary(result.summary ?? ''); setStatus(`${result.actions?.length ?? 0} outstanding items found`);
+      setActions(result.actions ?? []); setSummary(result.summary ?? ''); setStatus(result.notice || `${result.actions?.length ?? 0} outstanding items found`);
     } catch (error) { setStatus(error instanceof Error ? error.message : 'Could not read mailbox.'); }
   }, []);
   return <section className="mt-5 rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><input ref={inputRef} type="file" accept=".csv,text/csv" className="hidden" onChange={(event) => void upload(event.target.files?.[0])} /><div className="flex items-center justify-between gap-4"><div className="flex items-center gap-2 text-bny-teal"><Mail className="h-5 w-5" /><h2 className="font-semibold">Inbox action center</h2></div><button type="button" onClick={() => inputRef.current?.click()} className="rounded-xl bg-bny-teal px-3 py-2 text-xs font-bold text-bny-deep">Upload mailbox CSV</button></div>{status && <p className="mt-3 text-xs text-bny-paper/55">{status}</p>}{summary && <p className="mt-3 rounded-xl bg-white/[.05] p-3 text-sm leading-6 text-bny-paper/80">{summary}</p>}{actions.length > 0 && <div className="mt-4 space-y-2">{actions.map((action, index) => <article key={`${action.title}-${index}`} className="rounded-xl border border-white/10 bg-white/[.035] p-3"><div className="flex items-start justify-between gap-3"><p className="text-sm font-semibold text-bny-paper">{action.title}</p><span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase ${action.priority === 'high' ? 'bg-red-400/15 text-red-200' : action.priority === 'medium' ? 'bg-bny-gold/15 text-[#f0d89a]' : 'bg-bny-teal/15 text-bny-teal'}`}>{action.priority}</span></div><p className="mt-2 text-xs text-bny-teal">{action.deadline}</p><p className="mt-2 text-xs leading-5 text-bny-paper/60">{action.context}</p><p className="mt-2 text-[11px] text-bny-paper/40">{action.from}</p></article>)}</div>}</section>;
@@ -197,16 +213,17 @@ function ownerColor(owner: string) {
 }
 
 function VisualCalendar({ events, showOwner = false }: { events: CalendarEvent[]; showOwner?: boolean }) {
-  const [expanded, setExpanded] = useState(false);
+  const [isOpen, setIsOpen] = useState(true);
   const [offset, setOffset] = useState(0);
+  const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
   const start = useMemo(() => { const date = new Date(); date.setHours(0, 0, 0, 0); date.setMonth(date.getMonth() + offset, 1); return date; }, [offset]);
   const days = useMemo(() => {
     const gridStart = new Date(start); gridStart.setDate(1 - gridStart.getDay());
-    return Array.from({ length: expanded ? 42 : 35 }, (_, index) => { const date = new Date(gridStart); date.setDate(gridStart.getDate() + index); return date; });
-  }, [expanded, start]);
+    return Array.from({ length: 42 }, (_, index) => { const date = new Date(gridStart); date.setDate(gridStart.getDate() + index); return date; });
+  }, [start]);
   const byDay = useMemo(() => new Map<string, CalendarEvent[]>(days.map((day) => [day.toDateString(), []])), [days]);
   events.forEach((event) => { const key = event.start.toDateString(); if (byDay.has(key)) byDay.get(key)?.push(event); });
-  return <section className="mb-5 overflow-hidden rounded-2xl border border-white/10 bg-[#002c47]/65"><div className="flex items-center justify-between border-b border-white/10 px-5 py-3"><div className="flex items-center gap-3"><CalendarRange className="h-4 w-4 text-bny-teal" /><p className="text-sm font-semibold text-bny-paper">Calendar</p><span className="text-xs text-bny-paper/50">{start.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span></div><div className="flex items-center gap-2"><button type="button" onClick={() => setOffset((current) => current - 1)} className="rounded-lg px-2 py-1 text-sm text-bny-paper/60 hover:bg-white/10">‹</button><button type="button" onClick={() => setOffset(0)} className="rounded-lg px-2 py-1 text-xs text-bny-paper/60 hover:bg-white/10">Today</button><button type="button" onClick={() => setOffset((current) => current + 1)} className="rounded-lg px-2 py-1 text-sm text-bny-paper/60 hover:bg-white/10">›</button><button type="button" onClick={() => setExpanded((current) => !current)} className="ml-1 inline-flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-bny-paper/65 hover:border-bny-teal/50 hover:text-bny-teal">{expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}{expanded ? 'Collapse' : 'Expand'}</button></div></div>{expanded && <div className="grid grid-cols-7 border-b border-white/10 text-center text-[10px] font-bold uppercase tracking-[.12em] text-bny-paper/40">{['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day) => <span key={day} className="py-2">{day}</span>)}</div>}<div className={`grid grid-cols-7 ${expanded ? '' : 'max-h-44 overflow-hidden'}`}>{days.map((day) => { const isCurrentMonth = day.getMonth() === start.getMonth(); const meetings = byDay.get(day.toDateString()) ?? []; return <div key={day.toISOString()} className={`min-h-20 border-b border-r border-white/[.07] p-1.5 ${isCurrentMonth ? 'bg-white/[.012]' : 'bg-bny-deep/20 text-bny-paper/30'}`}><p className="mb-1 text-right text-[10px] text-bny-paper/55">{day.getDate()}</p>{meetings.slice(0, expanded ? 4 : 2).map((event) => <div key={event.id} title={`${formatTime(event.start)} ${event.title}${showOwner ? ` · ${event.owner}` : ''}`} style={{ borderLeftColor: showOwner ? ownerColors[ownerColor(event.owner)] : '#58c7d6' }} className="mb-1 truncate border-l-2 bg-white/[.055] px-1.5 py-1 text-[10px] leading-4 text-bny-paper"><span className="text-bny-teal">{formatTime(event.start)}</span> {event.title}</div>)}{meetings.length > (expanded ? 4 : 2) && <p className="pl-1 text-[10px] text-bny-paper/45">+{meetings.length - (expanded ? 4 : 2)} more</p>}</div>; })}</div>{showOwner && <div className="flex flex-wrap gap-3 border-t border-white/10 px-5 py-2 text-[10px] text-bny-paper/50">{[...new Set(events.map((event) => event.owner))].map((owner) => <span key={owner} className="inline-flex items-center gap-1.5"><i className="h-2 w-2 rounded-full" style={{ backgroundColor: ownerColors[ownerColor(owner)] }} />{owner}</span>)}</div>}</section>;
+  return <section className="mb-5 overflow-hidden rounded-2xl border border-white/10 bg-[#002c47]/65"><div className="flex items-center justify-between px-5 py-3"><div className="flex items-center gap-3"><CalendarRange className="h-4 w-4 text-bny-teal" /><p className="text-sm font-semibold text-bny-paper">Calendar</p>{isOpen && <span className="text-xs text-bny-paper/50">{start.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span>}</div><div className="flex items-center gap-2">{isOpen && <><button type="button" onClick={() => setOffset((current) => current - 1)} className="rounded-lg px-2 py-1 text-sm text-bny-paper/60 hover:bg-white/10">‹</button><button type="button" onClick={() => setOffset(0)} className="rounded-lg px-2 py-1 text-xs text-bny-paper/60 hover:bg-white/10">Today</button><button type="button" onClick={() => setOffset((current) => current + 1)} className="rounded-lg px-2 py-1 text-sm text-bny-paper/60 hover:bg-white/10">›</button></>}<button type="button" onClick={() => setIsOpen((current) => !current)} className="ml-1 inline-flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-bny-paper/65 hover:border-bny-teal/50 hover:text-bny-teal">{isOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}{isOpen ? 'Collapse' : 'Expand'}</button></div></div>{isOpen && <><div className="grid grid-cols-7 border-y border-white/10 text-center text-[10px] font-bold uppercase tracking-[.12em] text-bny-paper/40">{['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day) => <span key={day} className="py-2">{day}</span>)}</div><div className="grid grid-cols-7">{days.map((day) => { const isCurrentMonth = day.getMonth() === start.getMonth(); const meetings = byDay.get(day.toDateString()) ?? []; return <div key={day.toISOString()} className={`min-h-20 border-b border-r border-white/[.07] p-1.5 ${isCurrentMonth ? 'bg-white/[.012]' : 'bg-bny-deep/20 text-bny-paper/30'}`}><p className="mb-1 text-right text-[10px] text-bny-paper/55">{day.getDate()}</p>{meetings.slice(0, 4).map((event) => <button type="button" key={event.id} onClick={() => setSelectedEvent(event)} style={{ borderLeftColor: showOwner ? ownerColors[ownerColor(event.owner)] : '#58c7d6' }} className="mb-1 block w-full truncate border-l-2 bg-white/[.055] px-1.5 py-1 text-left text-[10px] leading-4 text-bny-paper hover:bg-white/[.12]"><span className="text-bny-teal">{formatTime(event.start)}</span> {event.title}</button>)}{meetings.length > 4 && <p className="pl-1 text-[10px] text-bny-paper/45">+{meetings.length - 4} more</p>}</div>; })}</div>{showOwner && <div className="flex flex-wrap gap-3 border-t border-white/10 px-5 py-2 text-[10px] text-bny-paper/50">{[...new Set(events.map((event) => event.owner))].map((owner) => <span key={owner} className="inline-flex items-center gap-1.5"><i className="h-2 w-2 rounded-full" style={{ backgroundColor: ownerColors[ownerColor(owner)] }} />{owner}</span>)}</div>}</>}{selectedEvent && <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#00121f]/75 p-4 backdrop-blur-sm"><article className="w-full max-w-md rounded-2xl border border-white/10 bg-[#002c47] p-5 shadow-2xl"><div className="flex justify-between gap-4"><div><p className="text-xs font-bold uppercase tracking-[.14em] text-bny-teal">Meeting</p><h3 className="mt-2 text-lg font-semibold text-bny-paper">{selectedEvent.title}</h3></div><button type="button" onClick={() => setSelectedEvent(null)} className="text-bny-paper/60 hover:text-bny-paper"><X className="h-5 w-5" /></button></div><p className="mt-4 text-sm text-bny-paper/75">{formatDate(selectedEvent.start)} · {formatTime(selectedEvent.start)} – {formatTime(selectedEvent.end)}</p>{showOwner && <p className="mt-2 text-sm text-bny-paper/70">BNY owner: {selectedEvent.owner}</p>}<div className="mt-4 border-t border-white/10 pt-4"><p className="text-[10px] font-bold uppercase tracking-[.14em] text-bny-paper/45">External attendees</p><div className="mt-2 flex flex-wrap gap-2">{selectedEvent.externalAttendees.map((email) => <span key={email} className="rounded-full border border-bny-gold/30 bg-bny-gold/10 px-2.5 py-1 text-xs text-[#f0d89a]">{email}</span>)}</div></div></article></div>}</section>;
 }
 
 function ClientTracker({ events }: { events: CalendarEvent[] }) {
@@ -433,6 +450,17 @@ export default function Home() {
 
   useEffect(() => {
     let cancelled = false;
+    void fetchSharedClientProfiles().then((profiles) => {
+      if (!cancelled && profiles && Object.keys(profiles).length > 0) {
+        setClientDirectory(profiles);
+        window.localStorage.setItem(CLIENT_DIRECTORY_KEY, JSON.stringify(profiles));
+      }
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     async function hydrateTeam() {
       try {
         const remoteTeam = await fetchSharedTeamCalendars();
@@ -501,10 +529,11 @@ export default function Home() {
     const current = readStoredCalendars();
     persist({ ...current, team: current.team.map((calendar) => calendar.id === id ? { ...calendar, owner, events: calendar.events.map((event) => ({ ...event, owner })) } : calendar) }, true);
   }, [persist]);
-  const updateClientDirectory = useCallback((domain: string, value: { name: string; aliases: string[] }) => {
+  const updateClientDirectory = useCallback((domain: string, value: ClientProfile) => {
     setClientDirectory((current) => {
       const next = { ...current, [domain]: value };
       window.localStorage.setItem(CLIENT_DIRECTORY_KEY, JSON.stringify(next));
+      void saveSharedClientProfiles(next).catch(() => undefined);
       return next;
     });
   }, []);

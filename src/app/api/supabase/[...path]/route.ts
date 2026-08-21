@@ -3,19 +3,20 @@ import { hasDashboardAccess } from '@/lib/access';
 
 export const dynamic = 'force-dynamic';
 
-const ALLOWED_PATH = 'rest/v1/calendar_team_workspaces';
+const ALLOWED_PATHS = new Set(['rest/v1/calendar_team_workspaces', 'rest/v1/calendar_client_profiles']);
 
 async function proxy(request: Request, context: { params: Promise<{ path: string[] }> }) {
   if (!await hasDashboardAccess()) return NextResponse.json({ error: 'Dashboard access required.' }, { status: 401 });
   const { path } = await context.params;
-  if (path.join('/') !== ALLOWED_PATH) return NextResponse.json({ error: 'This Supabase route is not available.' }, { status: 404 });
+  const requestedPath = path.join('/');
+  if (!ALLOWED_PATHS.has(requestedPath)) return NextResponse.json({ error: 'This Supabase route is not available.' }, { status: 404 });
 
   const { SUPABASE_URL, SUPABASE_ANON_KEY } = process.env;
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return NextResponse.json({ error: 'Supabase proxy is not configured.' }, { status: 503 });
   // Accept either the Project URL or the Data API URL copied from Supabase,
   // with or without the trailing slash: https://ref.supabase.co/rest/v1/.
   const projectUrl = SUPABASE_URL.trim().replace(/\/+$/, '').replace(/\/rest\/v1$/, '');
-  const target = `${projectUrl}/${ALLOWED_PATH}${new URL(request.url).search}`;
+  const target = `${projectUrl}/${requestedPath}${new URL(request.url).search}`;
 
   try {
     const upstream = await fetch(target, {
