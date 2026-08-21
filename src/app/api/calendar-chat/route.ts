@@ -35,6 +35,7 @@ export async function POST(request: Request) {
       headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
+        store: false,
         input: [{ role: 'system', content: system }, ...messages],
         max_output_tokens: 500,
       }),
