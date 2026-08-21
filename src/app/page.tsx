@@ -186,7 +186,8 @@ function InboxActionCenter() {
       if (subject < 0 || body < 0) throw new Error('Mailbox CSV must contain Subject and Body columns.');
       emails = rows.map((row) => ({ subject: row[subject] || '', body: row[body] || '', from: sender >= 0 ? row[sender] || '' : '', importance: importance >= 0 ? row[importance] || '' : '' })).filter((email) => email.subject || email.body);
       setStatus('Finding outstanding actions…');
-      const response = await fetch('/api/inbox-actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emails }) });
+      const analysisEmails = emails.slice(0, 40).map((email) => ({ subject: email.subject.slice(0, 500), body: email.body.slice(0, 1200), from: email.from.slice(0, 240), importance: email.importance }));
+      const response = await fetch('/api/inbox-actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emails: analysisEmails }) });
       const result = await response.json().catch(() => ({})); if (!response.ok) throw new Error(result.error || 'Could not analyze mailbox.');
       setActions(result.actions ?? []); setSummary(result.summary ?? ''); setStatus(result.notice || `${result.actions?.length ?? 0} outstanding items found`);
     } catch (error) { const fallback = localInboxActions(emails); if (fallback.length > 0) { setActions(fallback); setSummary('AI analysis was unavailable, so locally extracted action candidates are shown.'); setStatus(error instanceof Error ? `${error.message} Showing local action candidates.` : 'Showing local action candidates.'); } else setStatus(error instanceof Error ? error.message : 'Could not read mailbox.'); }
