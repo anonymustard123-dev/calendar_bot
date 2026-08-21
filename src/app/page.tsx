@@ -152,13 +152,20 @@ function UploadZone({ multiple, onUpload }: { multiple?: boolean; onUpload: (fil
   );
 }
 
-type InboxAction = { title: string; deadline: string; priority: 'high' | 'medium' | 'low'; from: string; context: string };
-type InboxEmail = { subject: string; body: string; from: string; to?: string; importance?: string };
+type InboxAction = { title: string; deadline: string; priority: 'high' | 'medium' | 'low'; from: string; context: string; directedAtYou: boolean };
+type InboxEmail = { subject: string; body: string; from: string; to?: string; cc?: string; importance?: string };
 
 function parseCsv(text: string) {
   const rows: string[][] = []; let row: string[] = []; let cell = ''; let quoted = false;
   for (let index = 0; index < text.length; index += 1) { const char = text[index]; const next = text[index + 1]; if (char === '"' && quoted && next === '"') { cell += '"'; index += 1; } else if (char === '"') quoted = !quoted; else if (char === ',' && !quoted) { row.push(cell); cell = ''; } else if ((char === '\n' || char === '\r') && !quoted) { if (char === '\r' && next === '\n') index += 1; row.push(cell); if (row.some(Boolean)) rows.push(row); row = []; cell = ''; } else cell += char; }
   row.push(cell); if (row.some(Boolean)) rows.push(row); return rows;
+}
+
+function isDirectRyanMessage(email: InboxEmail) {
+  const text = `${email.subject}\n${email.body}\n${email.from}`;
+  const recipients = `${email.to ?? ''}\n${email.cc ?? ''}`.toLowerCase();
+  const automated = /\b(my ?task|automatic reply|out of office|delivery status|undeliverable|read receipt|calendar invitation|meeting (?:accepted|declined)|sharepoint online)\b/i;
+  return /sharma,\s*ryan|ryan\s+sharma/.test(recipients) && !automated.test(text);
 }
 
 function localInboxActions(emails: InboxEmail[]): InboxAction[] {
@@ -167,7 +174,7 @@ function localInboxActions(emails: InboxEmail[]): InboxAction[] {
   const candidates = emails.filter((email) => actionSignal.test(`${email.subject}\n${email.body}`) && !systemNoise.test(`${email.subject}\n${email.body}`));
   return (candidates.length ? candidates : emails).slice(0, 20).map((email) => {
     const text = `${email.subject}\n${email.body}`;
-    return { title: email.subject || 'Review email', deadline: text.match(/\b(?:due|by|before)\s+([^\n.;]{2,60})/i)?.[0] || 'No stated deadline', priority: /\b(urgent|asap|critical|eod|today)\b/i.test(text) ? 'high' : 'medium', from: email.from || 'Unknown sender', context: email.body.replace(/\s+/g, ' ').slice(0, 220) || 'Review this email for the requested action.' };
+    return { title: email.subject || 'Review email', deadline: text.match(/\b(?:due|by|before)\s+([^\n.;]{2,60})/i)?.[0] || 'No stated deadline', priority: /\b(urgent|asap|critical|eod|today)\b/i.test(text) ? 'high' : 'medium', from: email.from || 'Unknown sender', context: email.body.replace(/\s+/g, ' ').slice(0, 300) || 'Review this email for the requested action.', directedAtYou: true };
   });
 }
 
@@ -185,19 +192,21 @@ function InboxActionCenter() {
       const rows = parseCsv(await file.text()); const headers = rows.shift()?.map((value) => value.trim());
       if (!headers) throw new Error('Mailbox CSV is empty.');
       const column = (name: string) => headers.findIndex((header) => header.toLowerCase() === name.toLowerCase());
-      const subject = column('Subject'); const body = column('Body'); const sender = column('From: (Name)'); const recipient = column('To: (Name)'); const importance = column('Importance');
+      const subject = column('Subject'); const body = column('Body'); const sender = column('From: (Name)'); const recipient = column('To: (Name)'); const cc = column('CC: (Name)'); const importance = column('Importance');
       if (subject < 0 || body < 0) throw new Error('Mailbox CSV must contain Subject and Body columns.');
-      emails = rows.map((row) => ({ subject: row[subject] || '', body: row[body] || '', from: sender >= 0 ? row[sender] || '' : '', to: recipient >= 0 ? row[recipient] || '' : '', importance: importance >= 0 ? row[importance] || '' : '' })).filter((email) => email.subject || email.body);
+      emails = rows.map((row) => ({ subject: row[subject] || '', body: row[body] || '', from: sender >= 0 ? row[sender] || '' : '', to: recipient >= 0 ? row[recipient] || '' : '', cc: cc >= 0 ? row[cc] || '' : '', importance: importance >= 0 ? row[importance] || '' : '' })).filter((email) => email.subject || email.body);
       setStatus('Finding outstanding actions…');
-      const recentEmails = emails.slice(0, mailWindow);
-      setStatus(`Reviewing the first ${recentEmails.length} emails in this export...`);
-      const analysisEmails = recentEmails.map((email) => ({ subject: email.subject.slice(0, 500), body: email.body.slice(0, 1200), from: email.from.slice(0, 240), to: email.to?.slice(0, 240) || '', importance: email.importance }));
-      const response = await fetch('/api/inbox-actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emails: analysisEmails, mailboxOrder: 'newest_first' }) });
+      const recentEmails = emails.slice(-mailWindow);
+      const directEmails = recentEmails.filter(isDirectRyanMessage);
+      setStatus(`Reviewing ${directEmails.length} direct messages to Ryan from the latest ${recentEmails.length} export rows...`);
+      if (!directEmails.length) { setActions([]); setSummary('No direct, non-automated messages to Ryan were found in this recent export window.'); return; }
+      const analysisEmails = directEmails.map((email) => ({ subject: email.subject.slice(0, 500), body: email.body.slice(0, 1200), from: email.from.slice(0, 240), to: email.to?.slice(0, 240) || '', cc: email.cc?.slice(0, 240) || '', importance: email.importance }));
+      const response = await fetch('/api/inbox-actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emails: analysisEmails, mailboxOrder: 'newest_last' }) });
       const result = await response.json().catch(() => ({})); if (!response.ok) throw new Error(result.error || 'Could not analyze mailbox.');
       setActions(result.actions ?? []); setSummary(result.summary ?? ''); setStatus(result.notice || `${result.actions?.length ?? 0} outstanding items found`);
-    } catch (error) { const fallback = localInboxActions(emails.slice(0, mailWindow)); if (fallback.length > 0) { setActions(fallback); setSummary('AI analysis was unavailable, so locally extracted action candidates are shown.'); setStatus(error instanceof Error ? `${error.message} Showing local action candidates.` : 'Showing local action candidates.'); } else setStatus(error instanceof Error ? error.message : 'Could not read mailbox.'); }
+    } catch (error) { const fallback = localInboxActions(emails.slice(-mailWindow).filter(isDirectRyanMessage)); if (fallback.length > 0) { setActions(fallback); setSummary('AI analysis was unavailable, so locally extracted action candidates are shown.'); setStatus(error instanceof Error ? `${error.message} Showing local action candidates.` : 'Showing local action candidates.'); } else setStatus(error instanceof Error ? error.message : 'Could not read mailbox.'); }
   }, [mailWindow]);
-  return <section className="mt-5 rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><input ref={inputRef} type="file" accept=".csv,text/csv" className="hidden" onChange={(event) => void upload(event.target.files?.[0])} /><div className="flex flex-wrap items-center justify-between gap-4"><div className="flex items-center gap-2 text-bny-teal"><Mail className="h-5 w-5" /><h2 className="font-semibold">Inbox action center</h2></div><div className="flex items-center gap-2"><label className="text-xs text-bny-paper/55" htmlFor="mail-window">Review newest</label><select id="mail-window" value={mailWindow} onChange={(event) => setMailWindow(Number(event.target.value) as 25 | 50 | 100)} className="rounded-xl border border-white/10 bg-[#002a45] px-3 py-2 text-xs text-bny-paper outline-none"><option value={25}>25 emails</option><option value={50}>50 emails</option><option value={100}>100 emails</option></select><button type="button" onClick={() => inputRef.current?.click()} className="rounded-xl bg-bny-teal px-3 py-2 text-xs font-bold text-bny-deep">Upload mailbox CSV</button></div></div><p className="mt-2 text-[11px] text-bny-paper/40">This uses the first rows in the Outlook export as the newest mail. Export your mailbox sorted newest first.</p>{status && <p className="mt-3 text-xs text-bny-paper/55">{status}</p>}{summary && <p className="mt-3 rounded-xl bg-white/[.05] p-3 text-sm leading-6 text-bny-paper/80">{summary}</p>}{actions.length > 0 && <div className="mt-4 space-y-2">{actions.map((action, index) => <article key={`${action.title}-${index}`} className="rounded-xl border border-white/10 bg-white/[.035] p-3"><div className="flex items-start justify-between gap-3"><p className="text-sm font-semibold text-bny-paper">{action.title}</p><span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase ${action.priority === 'high' ? 'bg-red-400/15 text-red-200' : action.priority === 'medium' ? 'bg-bny-gold/15 text-[#f0d89a]' : 'bg-bny-teal/15 text-bny-teal'}`}>{action.priority}</span></div><p className="mt-2 text-xs text-bny-teal">{action.deadline}</p><p className="mt-2 text-xs leading-5 text-bny-paper/60">{action.context}</p><p className="mt-2 text-[11px] text-bny-paper/40">{action.from}</p></article>)}</div>}</section>;
+  return <section className="mt-5 rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><input ref={inputRef} type="file" accept=".csv,text/csv" className="hidden" onChange={(event) => void upload(event.target.files?.[0])} /><div className="flex flex-wrap items-center justify-between gap-4"><div className="flex items-center gap-2 text-bny-teal"><Mail className="h-5 w-5" /><h2 className="font-semibold">Inbox action center</h2></div><div className="flex items-center gap-2"><label className="text-xs text-bny-paper/55" htmlFor="mail-window">Review latest</label><select id="mail-window" value={mailWindow} onChange={(event) => setMailWindow(Number(event.target.value) as 25 | 50 | 100)} className="rounded-xl border border-white/10 bg-[#002a45] px-3 py-2 text-xs text-bny-paper outline-none"><option value={25}>25 emails</option><option value={50}>50 emails</option><option value={100}>100 emails</option></select><button type="button" onClick={() => inputRef.current?.click()} className="rounded-xl bg-bny-teal px-3 py-2 text-xs font-bold text-bny-deep">Upload mailbox CSV</button></div></div><p className="mt-2 text-[11px] text-bny-paper/40">Uses the last rows in this Outlook export, then keeps direct, non-automated messages to Ryan only.</p>{status && <p className="mt-3 text-xs text-bny-paper/55">{status}</p>}{summary && <p className="mt-3 rounded-xl bg-white/[.05] p-3 text-sm leading-6 text-bny-paper/80">{summary}</p>}{actions.length > 0 && <div className="mt-4 space-y-2">{actions.map((action, index) => <article key={`${action.title}-${index}`} className="rounded-xl border border-white/10 bg-white/[.035] p-3"><div className="flex items-start justify-between gap-3"><p className="text-sm font-semibold text-bny-paper">{action.title}</p><span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase ${action.priority === 'high' ? 'bg-red-400/15 text-red-200' : action.priority === 'medium' ? 'bg-bny-gold/15 text-[#f0d89a]' : 'bg-bny-teal/15 text-bny-teal'}`}>{action.priority}</span></div><p className="mt-2 text-xs text-bny-teal">{action.deadline}</p><p className="mt-2 text-xs leading-5 text-bny-paper/75"><span className="font-semibold text-bny-paper">{action.from} said:</span> {action.context}</p><p className="mt-2 text-[11px] text-bny-paper/45">{action.directedAtYou ? 'Directed to Ryan' : 'Ryan was copied'}</p></article>)}</div>}</section>;
 }
 
 function EventList({ events, showOwner = false }: { events: CalendarEvent[]; showOwner?: boolean }) {
