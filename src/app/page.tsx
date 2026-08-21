@@ -153,6 +153,7 @@ function UploadZone({ multiple, onUpload }: { multiple?: boolean; onUpload: (fil
 }
 
 type InboxAction = { title: string; deadline: string; priority: 'high' | 'medium' | 'low'; from: string; context: string };
+type InboxEmail = { subject: string; body: string; from: string; to?: string; importance?: string };
 
 function parseCsv(text: string) {
   const rows: string[][] = []; let row: string[] = []; let cell = ''; let quoted = false;
@@ -160,9 +161,10 @@ function parseCsv(text: string) {
   row.push(cell); if (row.some(Boolean)) rows.push(row); return rows;
 }
 
-function localInboxActions(emails: Array<{ subject: string; body: string; from: string; importance?: string }>): InboxAction[] {
+function localInboxActions(emails: InboxEmail[]): InboxAction[] {
   const actionSignal = /\b(please|need|needed|action|required|respond|reply|review|approve|confirm|send|due|deadline|by\s+(?:eod|end of day|tomorrow|monday|tuesday|wednesday|thursday|friday|\d))/i;
-  const candidates = emails.filter((email) => actionSignal.test(`${email.subject}\n${email.body}`));
+  const systemNoise = /\b(automatic reply|out of office|delivery status|undeliverable|read receipt|calendar invitation|meeting (?:accepted|declined)|completed|thank you for your email)\b/i;
+  const candidates = emails.filter((email) => actionSignal.test(`${email.subject}\n${email.body}`) && !systemNoise.test(`${email.subject}\n${email.body}`));
   return (candidates.length ? candidates : emails).slice(0, 20).map((email) => {
     const text = `${email.subject}\n${email.body}`;
     return { title: email.subject || 'Review email', deadline: text.match(/\b(?:due|by|before)\s+([^\n.;]{2,60})/i)?.[0] || 'No stated deadline', priority: /\b(urgent|asap|critical|eod|today)\b/i.test(text) ? 'high' : 'medium', from: email.from || 'Unknown sender', context: email.body.replace(/\s+/g, ' ').slice(0, 220) || 'Review this email for the requested action.' };
@@ -174,25 +176,28 @@ function InboxActionCenter() {
   const [actions, setActions] = useState<InboxAction[]>([]);
   const [summary, setSummary] = useState('');
   const [status, setStatus] = useState('');
+  const [mailWindow, setMailWindow] = useState<25 | 50 | 100>(50);
   const upload = useCallback(async (file?: File) => {
     if (!file) return;
-    let emails: Array<{ subject: string; body: string; from: string; importance?: string }> = [];
+    let emails: InboxEmail[] = [];
     setStatus('Reading mailbox…');
     try {
       const rows = parseCsv(await file.text()); const headers = rows.shift()?.map((value) => value.trim());
       if (!headers) throw new Error('Mailbox CSV is empty.');
       const column = (name: string) => headers.findIndex((header) => header.toLowerCase() === name.toLowerCase());
-      const subject = column('Subject'); const body = column('Body'); const sender = column('From: (Name)'); const importance = column('Importance');
+      const subject = column('Subject'); const body = column('Body'); const sender = column('From: (Name)'); const recipient = column('To: (Name)'); const importance = column('Importance');
       if (subject < 0 || body < 0) throw new Error('Mailbox CSV must contain Subject and Body columns.');
-      emails = rows.map((row) => ({ subject: row[subject] || '', body: row[body] || '', from: sender >= 0 ? row[sender] || '' : '', importance: importance >= 0 ? row[importance] || '' : '' })).filter((email) => email.subject || email.body);
+      emails = rows.map((row) => ({ subject: row[subject] || '', body: row[body] || '', from: sender >= 0 ? row[sender] || '' : '', to: recipient >= 0 ? row[recipient] || '' : '', importance: importance >= 0 ? row[importance] || '' : '' })).filter((email) => email.subject || email.body);
       setStatus('Finding outstanding actions…');
-      const analysisEmails = emails.slice(0, 40).map((email) => ({ subject: email.subject.slice(0, 500), body: email.body.slice(0, 1200), from: email.from.slice(0, 240), importance: email.importance }));
-      const response = await fetch('/api/inbox-actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emails: analysisEmails }) });
+      const recentEmails = emails.slice(0, mailWindow);
+      setStatus(`Reviewing the first ${recentEmails.length} emails in this export...`);
+      const analysisEmails = recentEmails.map((email) => ({ subject: email.subject.slice(0, 500), body: email.body.slice(0, 1200), from: email.from.slice(0, 240), to: email.to?.slice(0, 240) || '', importance: email.importance }));
+      const response = await fetch('/api/inbox-actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emails: analysisEmails, mailboxOrder: 'newest_first' }) });
       const result = await response.json().catch(() => ({})); if (!response.ok) throw new Error(result.error || 'Could not analyze mailbox.');
       setActions(result.actions ?? []); setSummary(result.summary ?? ''); setStatus(result.notice || `${result.actions?.length ?? 0} outstanding items found`);
-    } catch (error) { const fallback = localInboxActions(emails); if (fallback.length > 0) { setActions(fallback); setSummary('AI analysis was unavailable, so locally extracted action candidates are shown.'); setStatus(error instanceof Error ? `${error.message} Showing local action candidates.` : 'Showing local action candidates.'); } else setStatus(error instanceof Error ? error.message : 'Could not read mailbox.'); }
-  }, []);
-  return <section className="mt-5 rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><input ref={inputRef} type="file" accept=".csv,text/csv" className="hidden" onChange={(event) => void upload(event.target.files?.[0])} /><div className="flex items-center justify-between gap-4"><div className="flex items-center gap-2 text-bny-teal"><Mail className="h-5 w-5" /><h2 className="font-semibold">Inbox action center</h2></div><button type="button" onClick={() => inputRef.current?.click()} className="rounded-xl bg-bny-teal px-3 py-2 text-xs font-bold text-bny-deep">Upload mailbox CSV</button></div>{status && <p className="mt-3 text-xs text-bny-paper/55">{status}</p>}{summary && <p className="mt-3 rounded-xl bg-white/[.05] p-3 text-sm leading-6 text-bny-paper/80">{summary}</p>}{actions.length > 0 && <div className="mt-4 space-y-2">{actions.map((action, index) => <article key={`${action.title}-${index}`} className="rounded-xl border border-white/10 bg-white/[.035] p-3"><div className="flex items-start justify-between gap-3"><p className="text-sm font-semibold text-bny-paper">{action.title}</p><span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase ${action.priority === 'high' ? 'bg-red-400/15 text-red-200' : action.priority === 'medium' ? 'bg-bny-gold/15 text-[#f0d89a]' : 'bg-bny-teal/15 text-bny-teal'}`}>{action.priority}</span></div><p className="mt-2 text-xs text-bny-teal">{action.deadline}</p><p className="mt-2 text-xs leading-5 text-bny-paper/60">{action.context}</p><p className="mt-2 text-[11px] text-bny-paper/40">{action.from}</p></article>)}</div>}</section>;
+    } catch (error) { const fallback = localInboxActions(emails.slice(0, mailWindow)); if (fallback.length > 0) { setActions(fallback); setSummary('AI analysis was unavailable, so locally extracted action candidates are shown.'); setStatus(error instanceof Error ? `${error.message} Showing local action candidates.` : 'Showing local action candidates.'); } else setStatus(error instanceof Error ? error.message : 'Could not read mailbox.'); }
+  }, [mailWindow]);
+  return <section className="mt-5 rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><input ref={inputRef} type="file" accept=".csv,text/csv" className="hidden" onChange={(event) => void upload(event.target.files?.[0])} /><div className="flex flex-wrap items-center justify-between gap-4"><div className="flex items-center gap-2 text-bny-teal"><Mail className="h-5 w-5" /><h2 className="font-semibold">Inbox action center</h2></div><div className="flex items-center gap-2"><label className="text-xs text-bny-paper/55" htmlFor="mail-window">Review newest</label><select id="mail-window" value={mailWindow} onChange={(event) => setMailWindow(Number(event.target.value) as 25 | 50 | 100)} className="rounded-xl border border-white/10 bg-[#002a45] px-3 py-2 text-xs text-bny-paper outline-none"><option value={25}>25 emails</option><option value={50}>50 emails</option><option value={100}>100 emails</option></select><button type="button" onClick={() => inputRef.current?.click()} className="rounded-xl bg-bny-teal px-3 py-2 text-xs font-bold text-bny-deep">Upload mailbox CSV</button></div></div><p className="mt-2 text-[11px] text-bny-paper/40">This uses the first rows in the Outlook export as the newest mail. Export your mailbox sorted newest first.</p>{status && <p className="mt-3 text-xs text-bny-paper/55">{status}</p>}{summary && <p className="mt-3 rounded-xl bg-white/[.05] p-3 text-sm leading-6 text-bny-paper/80">{summary}</p>}{actions.length > 0 && <div className="mt-4 space-y-2">{actions.map((action, index) => <article key={`${action.title}-${index}`} className="rounded-xl border border-white/10 bg-white/[.035] p-3"><div className="flex items-start justify-between gap-3"><p className="text-sm font-semibold text-bny-paper">{action.title}</p><span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase ${action.priority === 'high' ? 'bg-red-400/15 text-red-200' : action.priority === 'medium' ? 'bg-bny-gold/15 text-[#f0d89a]' : 'bg-bny-teal/15 text-bny-teal'}`}>{action.priority}</span></div><p className="mt-2 text-xs text-bny-teal">{action.deadline}</p><p className="mt-2 text-xs leading-5 text-bny-paper/60">{action.context}</p><p className="mt-2 text-[11px] text-bny-paper/40">{action.from}</p></article>)}</div>}</section>;
 }
 
 function EventList({ events, showOwner = false }: { events: CalendarEvent[]; showOwner?: boolean }) {
