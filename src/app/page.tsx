@@ -38,8 +38,11 @@ type ClientProfile = { name: string; aliases: string[]; nextStep?: string };
 type ClientDirectory = Record<string, ClientProfile>;
 type PersistedInboxActions = { actions: InboxAction[]; summary: string; status: string };
 const EMPTY_PERSISTED_CALENDARS: PersistedCalendars = { personal: null, team: [] };
+const EMPTY_INBOX_ACTIONS: PersistedInboxActions = { actions: [], summary: '', status: '' };
 const calendarListeners = new Set<() => void>();
+const inboxListeners = new Set<() => void>();
 let storedCalendars: PersistedCalendars | undefined;
+let storedInboxActions: PersistedInboxActions | undefined;
 
 const acceptedFile = (file: File) => /\.(ics|txt)$/i.test(file.name);
 
@@ -66,6 +69,34 @@ function saveCalendars(next: PersistedCalendars) {
   storedCalendars = next;
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
   calendarListeners.forEach((listener) => listener());
+}
+
+function readStoredInboxActions(): PersistedInboxActions {
+  if (typeof window === 'undefined') return EMPTY_INBOX_ACTIONS;
+  if (storedInboxActions) return storedInboxActions;
+  try {
+    const saved = window.localStorage.getItem(INBOX_ACTIONS_KEY);
+    storedInboxActions = saved ? JSON.parse(saved) as PersistedInboxActions : EMPTY_INBOX_ACTIONS;
+  } catch {
+    storedInboxActions = EMPTY_INBOX_ACTIONS;
+  }
+  return storedInboxActions;
+}
+
+function subscribeToInboxActions(listener: () => void) {
+  inboxListeners.add(listener);
+  return () => inboxListeners.delete(listener);
+}
+
+function saveStoredInboxActions(next: PersistedInboxActions) {
+  storedInboxActions = next;
+  window.localStorage.setItem(INBOX_ACTIONS_KEY, JSON.stringify(next));
+  inboxListeners.forEach((listener) => listener());
+}
+
+function mergeTeamCalendars(local: UploadedCalendar[], remote: UploadedCalendar[]) {
+  const localIds = new Set(local.map((calendar) => calendar.id));
+  return [...local, ...remote.filter((calendar) => !localIds.has(calendar.id))];
 }
 
 async function fetchSharedTeamCalendars(): Promise<UploadedCalendar[] | null> {
@@ -186,18 +217,11 @@ function InboxActionCenter() {
   const [summary, setSummary] = useState('');
   const [status, setStatus] = useState('');
   const [mailWindow, setMailWindow] = useState<25 | 50 | 100>(50);
-  const saveInboxActions = useCallback((next: PersistedInboxActions) => {
-    try { window.localStorage.setItem(INBOX_ACTIONS_KEY, JSON.stringify(next)); } catch { /* Browser storage is optional. */ }
-  }, []);
   useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem(INBOX_ACTIONS_KEY);
-      if (!stored) return;
-      const next = JSON.parse(stored) as PersistedInboxActions;
-      setActions(Array.isArray(next.actions) ? next.actions : []);
-      setSummary(typeof next.summary === 'string' ? next.summary : '');
-      setStatus(typeof next.status === 'string' ? next.status : '');
-    } catch { /* Ignore invalid stored inbox results. */ }
+    const next = readStoredInboxActions();
+    setActions(Array.isArray(next.actions) ? next.actions : []);
+    setSummary(typeof next.summary === 'string' ? next.summary : '');
+    setStatus(typeof next.status === 'string' ? next.status : '');
   }, []);
   const upload = useCallback(async (file?: File) => {
     if (!file) return;
@@ -214,14 +238,14 @@ function InboxActionCenter() {
       const recentEmails = emails.slice(-mailWindow);
       const directEmails = recentEmails.filter(isDirectRyanMessage);
       setStatus(`Reviewing ${directEmails.length} direct messages to Ryan from the latest ${recentEmails.length} export rows...`);
-      if (!directEmails.length) { const next = { actions: [], summary: 'No direct, non-automated messages to Ryan were found in this recent export window.', status: 'No relevant direct messages found' }; setActions(next.actions); setSummary(next.summary); setStatus(next.status); saveInboxActions(next); return; }
+      if (!directEmails.length) { const next = { actions: [], summary: 'No direct, non-automated messages to Ryan were found in this recent export window.', status: 'No relevant direct messages found' }; setActions(next.actions); setSummary(next.summary); setStatus(next.status); saveStoredInboxActions(next); return; }
       const analysisEmails = directEmails.map((email) => ({ subject: email.subject.slice(0, 500), body: email.body.slice(0, 1200), from: email.from.slice(0, 240), to: email.to?.slice(0, 240) || '', cc: email.cc?.slice(0, 240) || '', importance: email.importance }));
       const response = await fetch('/api/inbox-actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emails: analysisEmails, mailboxOrder: 'newest_last' }) });
       const result = await response.json().catch(() => ({})); if (!response.ok) throw new Error(result.error || 'Could not analyze mailbox.');
       const next = { actions: result.actions ?? [], summary: result.summary ?? '', status: result.notice || `${result.actions?.length ?? 0} outstanding items found` };
-      setActions(next.actions); setSummary(next.summary); setStatus(next.status); saveInboxActions(next);
-    } catch (error) { const fallback = localInboxActions(emails.slice(-mailWindow).filter(isDirectRyanMessage)); if (fallback.length > 0) { const next = { actions: fallback, summary: 'AI analysis was unavailable, so locally extracted action candidates are shown.', status: error instanceof Error ? `${error.message} Showing local action candidates.` : 'Showing local action candidates.' }; setActions(next.actions); setSummary(next.summary); setStatus(next.status); saveInboxActions(next); } else { const next = { actions: [], summary: '', status: error instanceof Error ? error.message : 'Could not read mailbox.' }; setActions(next.actions); setSummary(next.summary); setStatus(next.status); saveInboxActions(next); } }
-  }, [mailWindow, saveInboxActions]);
+      setActions(next.actions); setSummary(next.summary); setStatus(next.status); saveStoredInboxActions(next);
+    } catch (error) { const fallback = localInboxActions(emails.slice(-mailWindow).filter(isDirectRyanMessage)); if (fallback.length > 0) { const next = { actions: fallback, summary: 'AI analysis was unavailable, so locally extracted action candidates are shown.', status: error instanceof Error ? `${error.message} Showing local action candidates.` : 'Showing local action candidates.' }; setActions(next.actions); setSummary(next.summary); setStatus(next.status); saveStoredInboxActions(next); } else { const next = { actions: [], summary: '', status: error instanceof Error ? error.message : 'Could not read mailbox.' }; setActions(next.actions); setSummary(next.summary); setStatus(next.status); saveStoredInboxActions(next); } }
+  }, [mailWindow]);
   return <section className="mt-5 rounded-2xl border border-white/10 bg-[#001f35]/70 p-5"><input ref={inputRef} type="file" accept=".csv,text/csv" className="hidden" onChange={(event) => void upload(event.target.files?.[0])} /><div className="flex flex-wrap items-center justify-between gap-4"><div className="flex items-center gap-2 text-bny-teal"><Mail className="h-5 w-5" /><h2 className="font-semibold">Inbox action center</h2></div><div className="flex items-center gap-2"><label className="text-xs text-bny-paper/55" htmlFor="mail-window">Review latest</label><select id="mail-window" value={mailWindow} onChange={(event) => setMailWindow(Number(event.target.value) as 25 | 50 | 100)} className="rounded-xl border border-white/10 bg-[#002a45] px-3 py-2 text-xs text-bny-paper outline-none"><option value={25}>25 emails</option><option value={50}>50 emails</option><option value={100}>100 emails</option></select><button type="button" onClick={() => inputRef.current?.click()} className="rounded-xl bg-bny-teal px-3 py-2 text-xs font-bold text-bny-deep">Upload mailbox CSV</button></div></div><p className="mt-2 text-[11px] text-bny-paper/40">Uses the last rows in this Outlook export, then keeps direct, non-automated messages to Ryan only.</p>{status && <p className="mt-3 text-xs text-bny-paper/55">{status}</p>}{summary && <p className="mt-3 rounded-xl bg-white/[.05] p-3 text-sm leading-6 text-bny-paper/80">{summary}</p>}{actions.length > 0 && <div className="mt-4 space-y-2">{actions.map((action, index) => <article key={`${action.title}-${index}`} className="rounded-xl border border-white/10 bg-white/[.035] p-3"><div className="flex items-start justify-between gap-3"><p className="text-sm font-semibold text-bny-paper">{action.title}</p><span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase ${action.priority === 'high' ? 'bg-red-400/15 text-red-200' : action.priority === 'medium' ? 'bg-bny-gold/15 text-[#f0d89a]' : 'bg-bny-teal/15 text-bny-teal'}`}>{action.priority}</span></div><p className="mt-2 text-xs text-bny-teal">{action.deadline}</p><p className="mt-2 text-xs leading-5 text-bny-paper/75"><span className="font-semibold text-bny-paper">{action.from} said:</span> {action.context}</p><p className="mt-2 text-[11px] text-bny-paper/45">{action.directedAtYou ? 'Directed to Ryan' : 'Ryan was copied'}</p></article>)}</div>}</section>;
 }
 
@@ -440,20 +464,21 @@ function ChatResponse({ content }: { content: string }) {
   return <div className="space-y-2">{rendered}</div>;
 }
 
-function CalendarChat({ personalEvents, teamEvents, personalUploaded, isOpen, onToggle }: { personalEvents: CalendarEvent[]; teamEvents: CalendarEvent[]; personalUploaded: boolean; isOpen: boolean; onToggle: () => void }) {
+function CalendarChat({ personalEvents, teamEvents, inboxActions, personalUploaded, isOpen, onToggle }: { personalEvents: CalendarEvent[]; teamEvents: CalendarEvent[]; inboxActions: InboxAction[]; personalUploaded: boolean; isOpen: boolean; onToggle: () => void }) {
   const [messages, setMessages] = useState<ChatMessage[]>([{ role: 'assistant', content: 'Ask me about upcoming meetings, clients, or team coverage.' }]);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
-  const [scope, setScope] = useState<'personal' | 'team' | 'both'>(personalUploaded ? 'both' : 'team');
+  const [scope, setScope] = useState<'personal' | 'team' | 'both'>(personalUploaded || inboxActions.length ? 'both' : 'team');
   const calendarContext = useMemo(() => [
     ...personalEvents.map((event) => ({ scope: 'My Calendar' as const, title: event.title, start: event.start.toISOString(), end: event.end.toISOString(), externalAttendees: event.externalAttendees })),
     ...teamEvents.map((event) => ({ scope: 'Team Calendars' as const, title: event.title, start: event.start.toISOString(), end: event.end.toISOString(), owner: event.owner, externalAttendees: event.externalAttendees })),
   ].slice(0, 160), [personalEvents, teamEvents]);
   const scopedContext = useMemo(() => calendarContext.filter((event) => scope === 'both' || (scope === 'personal' ? event.scope === 'My Calendar' : event.scope === 'Team Calendars')), [calendarContext, scope]);
+  const inboxContext = useMemo(() => scope === 'team' ? [] : inboxActions.slice(0, 20).map((action) => ({ title: action.title, deadline: action.deadline, priority: action.priority, from: action.from, directedAtYou: action.directedAtYou, context: action.context })), [inboxActions, scope]);
 
   useEffect(() => {
-    if (!personalUploaded && scope === 'personal') setScope('team');
-  }, [personalUploaded, scope]);
+    if (!personalUploaded && !inboxActions.length && scope === 'personal') setScope('team');
+  }, [inboxActions.length, personalUploaded, scope]);
 
   const ask = useCallback(async (question: string) => {
     const content = question.trim();
@@ -463,7 +488,7 @@ function CalendarChat({ personalEvents, teamEvents, personalUploaded, isOpen, on
     setDraft('');
     setSending(true);
     try {
-      const response = await fetch('/api/calendar-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: nextMessages.slice(1), calendarContext: scopedContext, scope, personalCalendarUploaded: personalUploaded }) });
+      const response = await fetch('/api/calendar-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: nextMessages.slice(1), calendarContext: scopedContext, inboxContext, scope, personalCalendarUploaded: personalUploaded }) });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || 'Calendar chat is unavailable.');
       setMessages((current) => [...current, { role: 'assistant', content: data.answer }]);
@@ -472,18 +497,19 @@ function CalendarChat({ personalEvents, teamEvents, personalUploaded, isOpen, on
     } finally {
       setSending(false);
     }
-  }, [messages, personalUploaded, scope, scopedContext, sending]);
+  }, [inboxContext, messages, personalUploaded, scope, scopedContext, sending]);
 
-  return <><button type="button" onClick={onToggle} className={`fixed right-0 top-28 z-30 hidden items-center gap-2 rounded-l-xl border border-r-0 border-white/15 bg-[#002c47] px-3 py-3 text-xs font-semibold text-bny-teal shadow-xl transition xl:flex ${isOpen ? 'translate-x-full' : 'translate-x-0'}`} aria-label="Open calendar chat"><PanelRightOpen className="h-4 w-4" /> Calendar chat</button><aside className={`fixed bottom-20 left-3 right-3 top-3 z-40 flex flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#001f35] shadow-2xl transition-transform duration-300 xl:bottom-4 xl:left-auto xl:right-4 xl:top-4 xl:w-[min(380px,calc(100vw-2rem))] ${isOpen ? 'translate-y-0 xl:translate-x-0' : 'translate-y-[calc(100%+6rem)] xl:translate-x-[calc(100%+2rem)]'}`} aria-hidden={!isOpen}>
-    <div className="border-b border-white/10 px-5 py-4"><div className="flex items-start justify-between"><div><div className="flex items-center gap-2 text-bny-teal"><MessageCircle className="h-5 w-5" /><h2 className="font-semibold">Ask your calendar</h2></div><p className="mt-1 text-xs leading-5 text-bny-paper/55">Answers use only the selected calendar source.</p></div><button type="button" onClick={onToggle} className="rounded-lg p-2 text-bny-paper/55 transition hover:bg-white/10 hover:text-bny-teal" aria-label="Collapse calendar chat"><PanelRightClose className="h-4 w-4" /></button></div><div className="mt-3 flex rounded-xl bg-bny-deep/60 p-1">{([{ key: 'personal', label: 'My calendar', disabled: !personalUploaded }, { key: 'team', label: 'Team', disabled: !teamEvents.length }, { key: 'both', label: 'Both', disabled: !personalUploaded && !teamEvents.length }] as const).map((option) => <button key={option.key} type="button" disabled={option.disabled} onClick={() => setScope(option.key)} className={`flex-1 rounded-lg px-2 py-1.5 text-[11px] font-semibold transition ${scope === option.key ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/60 hover:text-bny-paper'} disabled:cursor-not-allowed disabled:opacity-30`}>{option.label}</button>)}</div>{!personalUploaded && <p className="mt-2 text-[11px] text-bny-paper/45">No personal calendar is uploaded. Team results are not presented as your meetings.</p>}</div>
+  return <><button type="button" onClick={onToggle} className={`fixed right-0 top-28 z-30 hidden items-center gap-2 rounded-l-xl border border-r-0 border-white/15 bg-[#002c47] px-3 py-3 text-xs font-semibold text-bny-teal shadow-xl transition lg:flex ${isOpen ? 'translate-x-full' : 'translate-x-0'}`} aria-label="Open calendar chat"><PanelRightOpen className="h-4 w-4" /> Calendar chat</button><aside className={`fixed bottom-20 left-3 right-3 top-3 z-40 flex flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#001f35] shadow-2xl transition-transform duration-300 lg:bottom-4 lg:left-auto lg:right-4 lg:top-4 lg:w-[min(380px,calc(100vw-2rem))] ${isOpen ? 'translate-y-0 lg:translate-x-0' : 'translate-y-[calc(100%+6rem)] lg:translate-x-[calc(100%+2rem)]'}`} aria-hidden={!isOpen}>
+    <div className="border-b border-white/10 px-5 py-4"><div className="flex items-start justify-between"><div><div className="flex items-center gap-2 text-bny-teal"><MessageCircle className="h-5 w-5" /><h2 className="font-semibold">Ask your calendar</h2></div><p className="mt-1 text-xs leading-5 text-bny-paper/55">My Calendar also includes saved inbox actions.</p></div><button type="button" onClick={onToggle} className="rounded-lg p-2 text-bny-paper/55 transition hover:bg-white/10 hover:text-bny-teal" aria-label="Collapse calendar chat"><PanelRightClose className="h-4 w-4" /></button></div><div className="mt-3 flex rounded-xl bg-bny-deep/60 p-1">{([{ key: 'personal', label: 'My calendar', disabled: !personalUploaded && !inboxActions.length }, { key: 'team', label: 'Team', disabled: !teamEvents.length }, { key: 'both', label: 'Both', disabled: !personalUploaded && !teamEvents.length && !inboxActions.length }] as const).map((option) => <button key={option.key} type="button" disabled={option.disabled} onClick={() => setScope(option.key)} className={`flex-1 rounded-lg px-2 py-1.5 text-[11px] font-semibold transition ${scope === option.key ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/60 hover:text-bny-paper'} disabled:cursor-not-allowed disabled:opacity-30`}>{option.label}</button>)}</div>{!personalUploaded && <p className="mt-2 text-[11px] text-bny-paper/45">No personal calendar is uploaded. Saved inbox actions remain available in My calendar.</p>}</div>
     <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-4">{messages.map((message, index) => <div key={`${message.role}-${index}`} className={`max-w-[92%] rounded-2xl px-3.5 py-3 text-sm leading-6 ${message.role === 'user' ? 'ml-auto bg-bny-teal text-bny-deep' : 'bg-white/[.07] text-bny-paper/80'}`}>{message.role === 'assistant' ? <ChatResponse content={message.content} /> : message.content}</div>)}{sending && <div className="w-fit rounded-2xl bg-white/[.07] px-3.5 py-3 text-sm text-bny-paper/60">Reviewing your calendar...</div>}</div>
-    <div className="border-t border-white/10 p-4"><div className="mb-3 flex flex-wrap gap-2">{['Who am I meeting next week?', 'Which clients have the most meetings?', 'Summarize team client coverage.'].map((question) => <button key={question} type="button" disabled={sending} onClick={() => void ask(question)} className="rounded-full border border-white/10 px-2.5 py-1 text-[11px] text-bny-paper/65 transition hover:border-bny-teal/50 hover:text-bny-teal disabled:opacity-50">{question}</button>)}</div><form onSubmit={(event) => { event.preventDefault(); void ask(draft); }} className="flex items-end gap-2 rounded-xl border border-white/10 bg-bny-deep/50 p-2"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} rows={2} placeholder="Ask about your calendar…" className="min-h-12 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-bny-paper outline-none placeholder:text-bny-paper/35" /><button type="submit" disabled={!draft.trim() || sending} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-bny-teal text-bny-deep transition hover:bg-[#8adbe2] disabled:cursor-not-allowed disabled:opacity-45"><Send className="h-4 w-4" /><span className="sr-only">Send message</span></button></form></div>
-  </aside><button type="button" onClick={onToggle} className="fixed bottom-5 right-5 z-30 inline-flex items-center gap-2 rounded-full bg-bny-teal px-4 py-3 text-sm font-semibold text-bny-deep shadow-xl xl:hidden"><MessageCircle className="h-4 w-4" /> {isOpen ? 'Hide chat' : 'Ask your calendar'}</button></>;
+    <div className="border-t border-white/10 p-4"><div className="mb-3 flex flex-wrap gap-2">{['Who am I meeting next week?', 'What needs my attention from the inbox?', 'Summarize team client coverage.'].map((question) => <button key={question} type="button" disabled={sending} onClick={() => void ask(question)} className="rounded-full border border-white/10 px-2.5 py-1 text-[11px] text-bny-paper/65 transition hover:border-bny-teal/50 hover:text-bny-teal disabled:opacity-50">{question}</button>)}</div><form onSubmit={(event) => { event.preventDefault(); void ask(draft); }} className="flex items-end gap-2 rounded-xl border border-white/10 bg-bny-deep/50 p-2"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} rows={2} placeholder="Ask about your calendar or inbox…" className="min-h-12 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-bny-paper outline-none placeholder:text-bny-paper/35" /><button type="submit" disabled={!draft.trim() || sending} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-bny-teal text-bny-deep transition hover:bg-[#8adbe2] disabled:cursor-not-allowed disabled:opacity-45"><Send className="h-4 w-4" /><span className="sr-only">Send message</span></button></form></div>
+  </aside><button type="button" onClick={onToggle} className="fixed bottom-5 right-5 z-30 inline-flex items-center gap-2 rounded-full bg-bny-teal px-4 py-3 text-sm font-semibold text-bny-deep shadow-xl lg:hidden"><MessageCircle className="h-4 w-4" /> {isOpen ? 'Hide chat' : 'Ask your calendar'}</button></>;
 }
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<'personal' | 'team'>('personal');
   const persistedCalendars = useSyncExternalStore(subscribeToCalendars, readStoredCalendars, () => EMPTY_PERSISTED_CALENDARS);
+  const inboxActions = useSyncExternalStore(subscribeToInboxActions, readStoredInboxActions, () => EMPTY_INBOX_ACTIONS);
   const { personal, team } = persistedCalendars;
   const [errors, setErrors] = useState<string[]>([]);
   const [rangeDays, setRangeDays] = useState<7 | 30 | 90>(30);
@@ -519,8 +545,9 @@ export default function Home() {
         if (cancelled) return;
         const current = readStoredCalendars();
         if (remoteTeam === null) return;
-        if (remoteTeam.length > 0) saveCalendars({ ...current, team: remoteTeam });
-        else if (current.team.length > 0) await saveSharedTeamCalendars(current.team);
+        const mergedTeam = mergeTeamCalendars(current.team, remoteTeam);
+        if (mergedTeam.length !== current.team.length || mergedTeam.some((calendar, index) => calendar.id !== current.team[index]?.id)) saveCalendars({ ...current, team: mergedTeam });
+        if (mergedTeam.length > remoteTeam.length) await saveSharedTeamCalendars(mergedTeam);
       } catch { /* Team data remains available from browser storage. */ }
     }
     void hydrateTeam();
@@ -607,7 +634,7 @@ export default function Home() {
   }, [activeTab, personalView, rangeDays, search, teamView]);
 
   return <main className="min-h-screen px-4 py-5 sm:px-6 lg:px-10 lg:py-8">
-    <div className={`mx-auto max-w-[1800px] transition-all ${chatOpen ? 'xl:mr-[420px]' : ''}`}>
+    <div className={`mx-auto max-w-[1800px] transition-all ${chatOpen ? 'lg:mr-[420px]' : ''}`}>
       <header className="flex flex-col gap-6 border-b border-white/10 pb-7 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-4"><div className="flex h-14 w-20 items-center justify-center rounded-xl border border-white/10 bg-white/[.06] px-2"><Image src="/bny-logo.svg" alt="BNY" width={160} height={48} className="h-auto w-full" priority /></div><h1 className="text-xl font-semibold tracking-tight text-bny-paper sm:text-2xl">Client Meeting Intelligence</h1></div>
       </header>
@@ -630,7 +657,7 @@ export default function Home() {
       {activeTab === 'personal' && <div className="mt-6"><InboxActionCenter /></div>}
 
       <footer className="mt-10 flex items-center justify-between border-t border-white/10 py-5 text-xs text-bny-paper/40"><span>Client Meeting Intelligence</span><span className="flex items-center gap-1">Built for calendar visibility <ChevronRight className="h-3 w-3" /></span></footer>
-    <CalendarChat personalEvents={personalEvents} teamEvents={teamEvents} personalUploaded={Boolean(personal)} isOpen={chatOpen} onToggle={() => setChatOpen((open) => !open)} />
+    <CalendarChat personalEvents={personalEvents} teamEvents={teamEvents} inboxActions={inboxActions.actions} personalUploaded={Boolean(personal)} isOpen={chatOpen} onToggle={() => setChatOpen((open) => !open)} />
     </div>
   </main>;
 }
