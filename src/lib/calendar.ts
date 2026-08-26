@@ -83,7 +83,7 @@ export function parseCalendar(text: string, owner: string, referenceDate = new D
     masters.find((event) => event.uid === exception.uid)?.relateException(exception);
   });
 
-  return masters.flatMap((event, index) => {
+  const meetings = masters.flatMap((event, index) => {
     try {
       if (!event.isRecurring()) {
         const start = event.startDate?.toJSDate();
@@ -112,6 +112,9 @@ export function parseCalendar(text: string, owner: string, referenceDate = new D
       return [];
     }
   });
+  // Outlook exports may include the same recurrence instance both through the
+  // master series and as repeated exception records. Keep one UID/start pair.
+  return [...new Map(meetings.map((meeting) => [meeting.id, meeting])).values()];
 }
 
 export function reviveCalendar(calendar: StoredCalendar): UploadedCalendar {
