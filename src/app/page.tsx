@@ -280,7 +280,7 @@ function InboxActionCenter() {
 
 function EventList({ events, showOwner = false }: { events: CalendarEvent[]; showOwner?: boolean }) {
   if (!events.length) return <div className="rounded-2xl border border-white/10 bg-white/[0.035] px-6 py-12 text-center"><CalendarDays className="mx-auto h-7 w-7 text-bny-teal/60" /><p className="mt-3 text-sm font-semibold text-bny-paper">No upcoming client meetings found</p><p className="mt-1 text-xs text-bny-paper/55">Upload a calendar to identify meetings with non-BNY attendees.</p></div>;
-  return <MeetingPanel events={events} showOwner={showOwner} />;
+  return <MeetingPanelV2 events={events} showOwner={showOwner} />;
   return <div className="overflow-hidden rounded-2xl border border-white/10 bg-[#002c47]/65">
     <div className="hidden grid-cols-[1.35fr_.95fr_.8fr_1.6fr] gap-4 border-b border-white/10 px-5 py-3 text-[11px] font-bold uppercase tracking-[.16em] text-bny-paper/45 md:grid">
       <span>Meeting</span><span>Date & time</span>{showOwner && <span>Calendar owner</span>}{!showOwner && <span>Duration</span>}<span>External attendees</span>
@@ -294,6 +294,29 @@ function EventList({ events, showOwner = false }: { events: CalendarEvent[]; sho
       </article>)}
     </div>
   </div>;
+}
+
+type MeetingColumn = 'meeting' | 'date' | 'owner' | 'attendees';
+
+function MeetingPanelV2({ events, showOwner }: { events: CalendarEvent[]; showOwner: boolean }) {
+  const [isTableOpen, setIsTableOpen] = useState(true);
+  const [showControls, setShowControls] = useState(false);
+  const [showColumns, setShowColumns] = useState(false);
+  const [visibleColumns, setVisibleColumns] = useState<Record<MeetingColumn, boolean>>({ meeting: true, date: true, owner: true, attendees: true });
+  const [filters, setFilters] = useState({ meeting: '', date: '', owner: '', attendees: '' });
+  const columns = ([
+    { key: 'meeting' as const, label: 'Meeting', width: 'minmax(180px,1.35fr)' },
+    { key: 'date' as const, label: 'Date & time', width: 'minmax(150px,.95fr)' },
+    ...(showOwner ? [{ key: 'owner' as const, label: 'Calendar owner', width: 'minmax(130px,.8fr)' }] : []),
+    { key: 'attendees' as const, label: 'External attendees', width: 'minmax(240px,1.6fr)' },
+  ]).filter((column) => visibleColumns[column.key]);
+  const displayedEvents = useMemo(() => events.filter((event) => {
+    const match = (value: string, filter: string) => !filter.trim() || value.toLowerCase().includes(filter.trim().toLowerCase());
+    return match(event.title, filters.meeting) && match(formatDate(event.start), filters.date) && match(event.owner, filters.owner) && match(event.externalAttendees.join(' '), filters.attendees);
+  }), [events, filters]);
+  const gridTemplateColumns = columns.map((column) => column.width).join(' ');
+  const updateFilter = (key: keyof typeof filters, value: string) => setFilters((current) => ({ ...current, [key]: value }));
+  return <><VisualCalendar events={displayedEvents} showOwner={showOwner} /><section className="overflow-hidden rounded-2xl border border-white/10 bg-[#002c47]/65"><div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-5 py-3"><p className="text-sm font-semibold text-bny-paper">Meeting list <span className="ml-1 text-xs font-normal text-bny-paper/50">{displayedEvents.length} shown</span></p><div className="flex flex-wrap gap-2"><button type="button" onClick={() => setShowControls((open) => !open)} className="rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-bny-paper/75 hover:border-bny-teal/50 hover:text-bny-teal">Filters</button><button type="button" onClick={() => setShowColumns((open) => !open)} className="rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-bny-paper/75 hover:border-bny-teal/50 hover:text-bny-teal">Columns</button><button type="button" onClick={() => setIsTableOpen((open) => !open)} className="rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-bny-paper/75 hover:border-bny-teal/50 hover:text-bny-teal">{isTableOpen ? 'Collapse list' : 'Expand list'}</button></div></div>{showControls && <div className="grid gap-3 border-b border-white/10 bg-white/[.025] p-4 sm:grid-cols-2 lg:grid-cols-4"><label className="text-xs text-bny-paper/55">Meeting<input value={filters.meeting} onChange={(event) => updateFilter('meeting', event.target.value)} placeholder="Filter title" className="mt-1.5 w-full rounded-lg border border-white/10 bg-bny-deep/45 px-3 py-2 text-sm text-bny-paper outline-none focus:border-bny-teal" /></label><label className="text-xs text-bny-paper/55">Date<input value={filters.date} onChange={(event) => updateFilter('date', event.target.value)} placeholder="e.g. Aug 31" className="mt-1.5 w-full rounded-lg border border-white/10 bg-bny-deep/45 px-3 py-2 text-sm text-bny-paper outline-none focus:border-bny-teal" /></label>{showOwner && <label className="text-xs text-bny-paper/55">Owner<input value={filters.owner} onChange={(event) => updateFilter('owner', event.target.value)} placeholder="Filter owner" className="mt-1.5 w-full rounded-lg border border-white/10 bg-bny-deep/45 px-3 py-2 text-sm text-bny-paper outline-none focus:border-bny-teal" /></label>}<label className="text-xs text-bny-paper/55">External attendee<input value={filters.attendees} onChange={(event) => updateFilter('attendees', event.target.value)} placeholder="Filter attendee" className="mt-1.5 w-full rounded-lg border border-white/10 bg-bny-deep/45 px-3 py-2 text-sm text-bny-paper outline-none focus:border-bny-teal" /></label></div>}{showColumns && <div className="flex flex-wrap gap-x-5 gap-y-2 border-b border-white/10 bg-white/[.025] p-4">{([['meeting', 'Meeting'], ['date', 'Date & time'], ...(showOwner ? [['owner', 'Calendar owner']] : []), ['attendees', 'External attendees']] as Array<[MeetingColumn, string]>).map(([key, label]) => <label key={key} className="inline-flex items-center gap-2 text-xs text-bny-paper/70"><input type="checkbox" checked={visibleColumns[key]} onChange={() => setVisibleColumns((current) => ({ ...current, [key]: !current[key] }))} className="accent-bny-teal" />{label}</label>)}</div>}{isTableOpen && <div className="overflow-x-auto"><div className="min-w-[680px]"><div className="grid gap-4 border-b border-white/10 px-5 py-3 text-[11px] font-bold uppercase tracking-[.16em] text-bny-paper/45" style={{ gridTemplateColumns }}>{columns.map((column) => <span key={column.key}>{column.label}</span>)}</div><div className="divide-y divide-white/10">{displayedEvents.map((event) => <article key={event.id} className="grid gap-4 px-5 py-5" style={{ gridTemplateColumns }}>{visibleColumns.meeting && <div><p className="font-semibold text-bny-paper">{event.title}</p></div>}{visibleColumns.date && <div className="text-sm text-bny-paper/75"><p>{formatDate(event.start)}</p><p className="mt-1 text-xs text-bny-teal">{formatTime(event.start)} – {formatTime(event.end)}</p></div>}{showOwner && visibleColumns.owner && <div className="text-sm text-bny-paper/70">{event.owner}</div>}{visibleColumns.attendees && <div className="flex flex-wrap gap-1.5">{event.externalAttendees.map((email) => <span key={email} className="rounded-full border border-bny-gold/35 bg-bny-gold/10 px-2.5 py-1 text-xs text-[#f0d89a]">{email}</span>)}</div>}</article>)}{displayedEvents.length === 0 && <p className="px-5 py-8 text-sm text-bny-paper/55">No meetings match the selected column filters.</p>}</div></div></div>}</section></>;
 }
 
 function MeetingPanel({ events, showOwner }: { events: CalendarEvent[]; showOwner: boolean }) {
