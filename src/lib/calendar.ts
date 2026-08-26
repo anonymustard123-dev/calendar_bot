@@ -65,11 +65,48 @@ function isCancelled(event: ICAL.Event) {
   return status === 'cancelled' || /^cancel(?:ed|led):/i.test(event.summary ?? '');
 }
 
-function toClientMeeting(event: ICAL.Event, start: Date, end: Date, owner: string, suffix: string): CalendarEvent | null {
+function meetingKey(meeting: CalendarEvent) {
+  return [
+    meeting.owner.trim().toLowerCase(),
+    meeting.start.getTime(),
+    meeting.end.getTime(),
+    meeting.title.replace(/\s+/g, ' ').trim().toLowerCase(),
+  ].join('|');
+}
+
+function dedupeMeetings(meetings: CalendarEvent[]) {
+  const unique = new Map<string, CalendarEvent>();
+  meetings.forEach((meeting) => {
+    const key = meetingKey(meeting);
+    const existing = unique.get(key);
+    if (!existing) {
+      unique.set(key, meeting);
+      return;
+    }
+    // Outlook can export one logical meeting through multiple VEVENT records
+    // with different attendee groups. Keep one occurrence and combine those groups.
+    existing.externalAttendees = [...new Set([...existing.externalAttendees, ...meeting.externalAttendees])];
+  });
+  return [...unique.values()];
+}
+
+function toClientMeeting(event: ICAL.Event, start: Date, end: Date, owner: string, suffix: string, master?: ICAL.Event): CalendarEvent | null {
   if (isCancelled(event)) return null;
-  const externalAttendees = externalAttendeesFor(event);
+  // Outlook sometimes emits a sparse recurrence exception: it has the changed
+  // date/time but none of the series' SUMMARY or ATTENDEE properties. In that
+  // case inherit those fields from the master series. An exception that does
+  // contain ATTENDEE values remains authoritative.
+  const hasInstanceAttendees = event.component.getAllProperties('attendee').length > 0;
+  const externalAttendees = hasInstanceAttendees || !master ? externalAttendeesFor(event) : externalAttendeesFor(master);
   if (externalAttendees.length === 0) return null;
-  return { id: `${owner}-${event.uid || suffix}-${start.getTime()}`, title: event.summary || 'Untitled meeting', start, end, externalAttendees: [...new Set(externalAttendees)], owner };
+  return {
+    id: `${owner}-${event.uid || master?.uid || suffix}-${start.getTime()}`,
+    title: event.summary || master?.summary || 'Untitled meeting',
+    start,
+    end,
+    externalAttendees: [...new Set(externalAttendees)],
+    owner,
+  };
 }
 
 export function parseCalendar(text: string, owner: string, referenceDate = new Date()): CalendarEvent[] {
@@ -102,7 +139,7 @@ export function parseCalendar(text: string, owner: string, referenceDate = new D
         const start = details.startDate.toJSDate();
         const end = details.endDate.toJSDate();
         if (end >= referenceDate) {
-          const clientMeeting = toClientMeeting(details.item, start, end, owner, `${index}-${start.getTime()}`);
+          const clientMeeting = toClientMeeting(details.item, start, end, owner, `${index}-${start.getTime()}`, event);
           if (clientMeeting) occurrences.push(clientMeeting);
         }
         occurrence = iterator.next();
@@ -112,9 +149,10 @@ export function parseCalendar(text: string, owner: string, referenceDate = new D
       return [];
     }
   });
-  // Outlook exports may include the same recurrence instance both through the
-  // master series and as repeated exception records. Keep one UID/start pair.
-  return [...new Map(meetings.map((meeting) => [meeting.id, meeting])).values()];
+  // Outlook exports can include a logical occurrence through multiple master
+  // series and exception records. De-duplicate by its visible identity, while
+  // preserving any external attendees contributed by each record.
+  return dedupeMeetings(meetings);
 }
 
 export function reviveCalendar(calendar: StoredCalendar): UploadedCalendar {
@@ -122,10 +160,10 @@ export function reviveCalendar(calendar: StoredCalendar): UploadedCalendar {
   return {
     ...calendar,
     owner,
-    events: calendar.events.flatMap((event) => {
+    events: dedupeMeetings(calendar.events.flatMap((event) => {
       const externalAttendees = event.externalAttendees.map(validEmail).filter(isExternalEmail);
       if (externalAttendees.length === 0 || /^cancel(?:ed|led):/i.test(event.title)) return [];
       return [{ ...event, externalAttendees: [...new Set(externalAttendees)], owner, start: new Date(event.start), end: new Date(event.end) }];
-    }),
+    })),
   };
 }
