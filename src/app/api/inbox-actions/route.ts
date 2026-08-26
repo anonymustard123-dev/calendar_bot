@@ -6,14 +6,14 @@ export const dynamic = 'force-dynamic';
 type InboxEmail = { subject: string; body: string; from: string; to?: string; cc?: string; importance?: string };
 
 function recipientNameVariants(name: string) {
-  const words = name.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+  const words = name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(/\s+/).filter(Boolean);
   if (words.length < 2) return [];
   return [...new Set([words.join(' '), [...words].reverse().join(' ')])];
 }
 
 function isDirectInboxMessage(email: InboxEmail, reviewFor: string) {
   const text = `${email.subject}\n${email.body}\n${email.from}`;
-  const recipients = `${email.to ?? ''}\n${email.cc ?? ''}`.toLowerCase();
+  const recipients = `${email.to ?? ''}\n${email.cc ?? ''}`.toLowerCase().replace(/[^a-z0-9]+/g, ' ');
   const automated = /\b(my ?task|automatic reply|out of office|delivery status|undeliverable|read receipt|calendar invitation|meeting (?:accepted|declined)|sharepoint online)\b/i;
   return recipientNameVariants(reviewFor).some((variant) => recipients.includes(variant)) && !automated.test(text);
 }
