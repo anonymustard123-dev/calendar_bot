@@ -74,7 +74,7 @@ function meetingKey(meeting: CalendarEvent) {
   ].join('|');
 }
 
-function dedupeMeetings(meetings: CalendarEvent[]) {
+export function dedupeCalendarEvents(meetings: CalendarEvent[]) {
   const unique = new Map<string, CalendarEvent>();
   meetings.forEach((meeting) => {
     const key = meetingKey(meeting);
@@ -85,7 +85,10 @@ function dedupeMeetings(meetings: CalendarEvent[]) {
     }
     // Outlook can export one logical meeting through multiple VEVENT records
     // with different attendee groups. Keep one occurrence and combine those groups.
-    existing.externalAttendees = [...new Set([...existing.externalAttendees, ...meeting.externalAttendees])];
+    unique.set(key, {
+      ...existing,
+      externalAttendees: [...new Set([...existing.externalAttendees, ...meeting.externalAttendees])],
+    });
   });
   return [...unique.values()];
 }
@@ -152,7 +155,7 @@ export function parseCalendar(text: string, owner: string, referenceDate = new D
   // Outlook exports can include a logical occurrence through multiple master
   // series and exception records. De-duplicate by its visible identity, while
   // preserving any external attendees contributed by each record.
-  return dedupeMeetings(meetings);
+  return dedupeCalendarEvents(meetings);
 }
 
 export function reviveCalendar(calendar: StoredCalendar): UploadedCalendar {
@@ -160,7 +163,7 @@ export function reviveCalendar(calendar: StoredCalendar): UploadedCalendar {
   return {
     ...calendar,
     owner,
-    events: dedupeMeetings(calendar.events.flatMap((event) => {
+    events: dedupeCalendarEvents(calendar.events.flatMap((event) => {
       const externalAttendees = event.externalAttendees.map(validEmail).filter(isExternalEmail);
       if (externalAttendees.length === 0 || /^cancel(?:ed|led):/i.test(event.title)) return [];
       return [{ ...event, externalAttendees: [...new Set(externalAttendees)], owner, start: new Date(event.start), end: new Date(event.end) }];
