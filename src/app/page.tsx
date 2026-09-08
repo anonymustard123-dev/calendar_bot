@@ -34,6 +34,9 @@ const STORAGE_KEY = 'bny-client-meeting-intelligence-v1';
 const CLIENT_DIRECTORY_KEY = 'bny-client-directory-v1';
 const INBOX_ACTIONS_KEY = 'bny-inbox-action-center-v1';
 const INBOX_REVIEW_NAME_KEY = 'bny-inbox-review-name-v1';
+const RECENT_MAILBOX_ROWS = 100;
+const MAX_CONTEXT_PER_THREAD = 4;
+const MAX_CONTEXT_EMAILS = 36;
 type PersistedCalendars = { personal: UploadedCalendar | null; team: UploadedCalendar[] };
 type ClientProfile = { name: string; aliases: string[]; nextStep?: string };
 type ClientDirectory = Record<string, ClientProfile>;
@@ -208,6 +211,25 @@ function isDirectInboxMessage(email: InboxEmail, reviewFor: string) {
   return recipientNameVariants(reviewFor).some((variant) => recipients.includes(variant)) && !automated.test(text);
 }
 
+function mailboxThread(subject: string) {
+  return subject.toLowerCase().replace(/^(?:re|fw|fwd)\s*:\s*/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function relatedMailboxContext(emails: InboxEmail[], reviewFor: string) {
+  const recent = emails.slice(-RECENT_MAILBOX_ROWS);
+  const activeThreads = new Set(recent.filter((email) => isDirectInboxMessage(email, reviewFor)).map((email) => mailboxThread(email.subject)).filter(Boolean));
+  if (!activeThreads.size) return [];
+  const perThread = new Map<string, InboxEmail[]>();
+  emails.slice(0, -RECENT_MAILBOX_ROWS).forEach((email) => {
+    const thread = mailboxThread(email.subject);
+    if (!activeThreads.has(thread) || !isDirectInboxMessage(email, reviewFor)) return;
+    const matches = perThread.get(thread) ?? [];
+    matches.push(email);
+    perThread.set(thread, matches);
+  });
+  return [...perThread.values()].flatMap((messages) => messages.slice(-MAX_CONTEXT_PER_THREAD)).slice(-MAX_CONTEXT_EMAILS);
+}
+
 function localInboxActions(emails: InboxEmail[]): InboxAction[] {
   const actionSignal = /\b(please|need|needed|action|required|respond|reply|review|approve|confirm|send|due|deadline|by\s+(?:eod|end of day|tomorrow|monday|tuesday|wednesday|thursday|friday|\d))/i;
   const systemNoise = /\b(automatic reply|out of office|delivery status|undeliverable|read receipt|calendar invitation|meeting (?:accepted|declined)|completed|thank you for your email)\b/i;
@@ -223,7 +245,7 @@ function InboxActionCenter() {
   const [actions, setActions] = useState<InboxAction[]>([]);
   const [summary, setSummary] = useState('');
   const [status, setStatus] = useState('');
-  const [mailWindow, setMailWindow] = useState<25 | 50 | 100>(50);
+  const [mailWindow, setMailWindow] = useState<25 | 50 | 100>(RECENT_MAILBOX_ROWS);
   const [reviewFor, setReviewFor] = useState('Ryan Sharma');
   useEffect(() => {
     const next = readStoredInboxActions();
@@ -245,16 +267,18 @@ function InboxActionCenter() {
       if (subject < 0 || body < 0) throw new Error('Mailbox CSV must contain Subject and Body columns.');
       emails = rows.map((row) => ({ subject: row[subject] || '', body: row[body] || '', from: sender >= 0 ? row[sender] || '' : '', to: recipient >= 0 ? row[recipient] || '' : '', cc: cc >= 0 ? row[cc] || '' : '', importance: importance >= 0 ? row[importance] || '' : '' })).filter((email) => email.subject || email.body);
       setStatus('Finding outstanding actions…');
-      const recentEmails = emails.slice(-mailWindow);
+      const recentEmails = emails.slice(-RECENT_MAILBOX_ROWS);
       const directEmails = recentEmails.filter((email) => isDirectInboxMessage(email, reviewFor));
-      setStatus(`Reviewing ${directEmails.length} direct messages for ${reviewFor} from the latest ${recentEmails.length} export rows...`);
+      const contextEmails = relatedMailboxContext(emails, reviewFor);
+      setStatus(`Reviewing ${directEmails.length} recent messages for ${reviewFor}; ${contextEmails.length} earlier thread messages are included as context only.`);
       if (!directEmails.length) { const next = { actions: [], summary: `No direct, non-automated messages for ${reviewFor} were found in this recent export window.`, status: 'No relevant direct messages found' }; setActions(next.actions); setSummary(next.summary); setStatus(next.status); saveStoredInboxActions(next); return; }
       const analysisEmails = directEmails.map((email) => ({ subject: email.subject.slice(0, 500), body: email.body.slice(0, 1200), from: email.from.slice(0, 240), to: email.to?.slice(0, 240) || '', cc: email.cc?.slice(0, 240) || '', importance: email.importance }));
-      const response = await fetch('/api/inbox-actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emails: analysisEmails, mailboxOrder: 'newest_last', reviewFor }) });
+      const contextForAnalysis = contextEmails.map((email) => ({ subject: email.subject.slice(0, 500), body: email.body.slice(0, 1200), from: email.from.slice(0, 240), to: email.to?.slice(0, 240) || '', cc: email.cc?.slice(0, 240) || '', importance: email.importance }));
+      const response = await fetch('/api/inbox-actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emails: analysisEmails, contextEmails: contextForAnalysis, mailboxOrder: 'newest_last', reviewFor }) });
       const result = await response.json().catch(() => ({})); if (!response.ok) throw new Error(result.error || 'Could not analyze mailbox.');
       const next = { actions: result.actions ?? [], summary: result.summary ?? '', status: result.notice || `${result.actions?.length ?? 0} outstanding items found` };
       setActions(next.actions); setSummary(next.summary); setStatus(next.status); saveStoredInboxActions(next);
-    } catch (error) { const fallback = localInboxActions(emails.slice(-mailWindow).filter((email) => isDirectInboxMessage(email, reviewFor))); if (fallback.length > 0) { const next = { actions: fallback, summary: 'AI analysis was unavailable, so locally extracted action candidates are shown.', status: error instanceof Error ? `${error.message} Showing local action candidates.` : 'Showing local action candidates.' }; setActions(next.actions); setSummary(next.summary); setStatus(next.status); saveStoredInboxActions(next); } else { const next = { actions: [], summary: '', status: error instanceof Error ? error.message : 'Could not read mailbox.' }; setActions(next.actions); setSummary(next.summary); setStatus(next.status); saveStoredInboxActions(next); } }
+    } catch (error) { const fallback = localInboxActions(emails.slice(-RECENT_MAILBOX_ROWS).filter((email) => isDirectInboxMessage(email, reviewFor))); if (fallback.length > 0) { const next = { actions: fallback, summary: 'AI analysis was unavailable, so locally extracted recent action candidates are shown.', status: error instanceof Error ? `${error.message} Showing local action candidates.` : 'Showing local action candidates.' }; setActions(next.actions); setSummary(next.summary); setStatus(next.status); saveStoredInboxActions(next); } else { const next = { actions: [], summary: '', status: error instanceof Error ? error.message : 'Could not read mailbox.' }; setActions(next.actions); setSummary(next.summary); setStatus(next.status); saveStoredInboxActions(next); } }
   }, [mailWindow, reviewFor]);
   return (
     <section className="mt-5 rounded-2xl border border-white/10 bg-[#001f35]/70 p-5">
@@ -264,12 +288,10 @@ function InboxActionCenter() {
         <div className="flex flex-wrap items-center gap-2">
           <label className="text-xs text-bny-paper/55" htmlFor="inbox-review-for">Review for</label>
           <input id="inbox-review-for" value={reviewFor} onChange={(event) => { const next = event.target.value; setReviewFor(next); window.localStorage.setItem(INBOX_REVIEW_NAME_KEY, next); }} placeholder="First and last name" className="w-40 rounded-xl border border-white/10 bg-[#002a45] px-3 py-2 text-xs text-bny-paper outline-none placeholder:text-bny-paper/35 focus:border-bny-teal" />
-          <label className="text-xs text-bny-paper/55" htmlFor="mail-window">Review latest</label>
-          <select id="mail-window" value={mailWindow} onChange={(event) => setMailWindow(Number(event.target.value) as 25 | 50 | 100)} className="rounded-xl border border-white/10 bg-[#002a45] px-3 py-2 text-xs text-bny-paper outline-none"><option value={25}>25 emails</option><option value={50}>50 emails</option><option value={100}>100 emails</option></select>
           <button type="button" onClick={() => inputRef.current?.click()} disabled={recipientNameVariants(reviewFor).length === 0} className="rounded-xl bg-bny-teal px-3 py-2 text-xs font-bold text-bny-deep disabled:cursor-not-allowed disabled:opacity-45">Upload mailbox CSV</button>
         </div>
       </div>
-      <p className="mt-2 text-[11px] text-bny-paper/40">Uses the newest rows in this Outlook export and keeps direct, non-automated messages addressed to the selected person.</p>
+      <p className="mt-2 text-[11px] text-bny-paper/40">Actions come only from the newest 100 export rows. Older related messages are reviewed only to provide conversation context.</p>
       {status && <p className="mt-3 text-xs text-bny-paper/55">{status}</p>}
       {summary && <p className="mt-3 rounded-xl bg-white/[.05] p-3 text-sm leading-6 text-bny-paper/80">{summary}</p>}
       {actions.length > 0 && <div className="mt-4 space-y-2">{actions.map((action, index) => <article key={`${action.title}-${index}`} className="rounded-xl border border-white/10 bg-white/[.035] p-3"><div className="flex items-start justify-between gap-3"><p className="text-sm font-semibold text-bny-paper">{action.title}</p><span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase ${action.priority === 'high' ? 'bg-red-400/15 text-red-200' : action.priority === 'medium' ? 'bg-bny-gold/15 text-[#f0d89a]' : 'bg-bny-teal/15 text-bny-teal'}`}>{action.priority}</span></div><p className="mt-2 text-xs text-bny-teal">{action.deadline}</p><p className="mt-2 text-xs leading-5 text-bny-paper/75"><span className="font-semibold text-bny-paper">{action.from} said:</span> {action.context}</p><p className="mt-2 text-[11px] text-bny-paper/45">{action.directedAtYou ? `Directed to ${reviewFor}` : `${reviewFor} was copied`}</p></article>)}</div>}
