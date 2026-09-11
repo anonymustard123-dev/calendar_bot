@@ -20,7 +20,10 @@ export type StoredCalendar = Omit<UploadedCalendar, 'events'> & {
   events: Array<Omit<CalendarEvent, 'start' | 'end'> & { start: string; end: string }>;
 };
 
-const MAX_LOOKAHEAD_DAYS = 90;
+// Keep enough history for relationship reviews while bounding recurrence expansion
+// for very large Outlook exports.
+const MAX_LOOKAHEAD_DAYS = 365;
+const MAX_HISTORY_DAYS = 365 * 5;
 
 function validEmail(value: string) {
   const email = value.replace(/^mailto:/i, '').trim();
@@ -116,6 +119,8 @@ export function parseCalendar(text: string, owner: string, referenceDate = new D
   const component = new ICAL.Component(ICAL.parse(text));
   const lookahead = new Date(referenceDate);
   lookahead.setDate(lookahead.getDate() + MAX_LOOKAHEAD_DAYS);
+  const historyStart = new Date(referenceDate);
+  historyStart.setDate(historyStart.getDate() - MAX_HISTORY_DAYS);
   const records = component.getAllSubcomponents('vevent').map((vevent) => new ICAL.Event(vevent));
   const masters = records.filter((event) => !event.isRecurrenceException());
 
@@ -128,7 +133,7 @@ export function parseCalendar(text: string, owner: string, referenceDate = new D
       if (!event.isRecurring()) {
         const start = event.startDate?.toJSDate();
         const end = event.endDate?.toJSDate() ?? start;
-        const clientMeeting = start && end && end >= referenceDate ? toClientMeeting(event, start, end, owner, String(index)) : null;
+        const clientMeeting = start && end && end >= historyStart && start <= lookahead ? toClientMeeting(event, start, end, owner, String(index)) : null;
         return clientMeeting ? [clientMeeting] : [];
       }
 
@@ -141,7 +146,7 @@ export function parseCalendar(text: string, owner: string, referenceDate = new D
         const details = event.getOccurrenceDetails(occurrence);
         const start = details.startDate.toJSDate();
         const end = details.endDate.toJSDate();
-        if (end >= referenceDate) {
+        if (end >= historyStart) {
           const clientMeeting = toClientMeeting(details.item, start, end, owner, `${index}-${start.getTime()}`, event);
           if (clientMeeting) occurrences.push(clientMeeting);
         }

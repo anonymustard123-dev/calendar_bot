@@ -40,6 +40,7 @@ const MAX_CONTEXT_EMAILS = 36;
 type PersistedCalendars = { personal: UploadedCalendar | null; team: UploadedCalendar[] };
 type ClientProfile = { name: string; aliases: string[]; nextStep?: string };
 type ClientDirectory = Record<string, ClientProfile>;
+type MeetingScope = 'upcoming' | 'all';
 type PersistedInboxActions = { actions: InboxAction[]; summary: string; status: string };
 const EMPTY_PERSISTED_CALENDARS: PersistedCalendars = { personal: null, team: [] };
 const EMPTY_INBOX_ACTIONS: PersistedInboxActions = { actions: [], summary: '', status: '' };
@@ -161,6 +162,10 @@ function formatDate(date: Date) {
 
 function formatTime(date: Date) {
   return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(date);
+}
+
+function defaultClientName(domain: string) {
+  return domain.replace(/\.[^.]+$/, '').split(/[._-]+/).filter(Boolean).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' ') || 'Client';
 }
 
 function UploadZone({ multiple, onUpload }: { multiple?: boolean; onUpload: (files: FileList | File[]) => void }) {
@@ -414,7 +419,7 @@ function downloadClientCsv(clients: ClientGroup[], directory: ClientDirectory, f
   const rows = clients.map((client) => {
     const profile = directory[client.domain];
     const next = client.events[0];
-    return [profile?.name || client.domain, (profile?.aliases ?? []).join('; '), [...client.contacts].join('; '), [...client.owners].join('; '), `${formatDate(next.start)} ${formatTime(next.start)} — ${next.title}`, String(client.events.length)];
+    return [profile?.name || defaultClientName(client.domain), (profile?.aliases ?? []).join('; '), [...client.contacts].join('; '), [...client.owners].join('; '), `${formatDate(next.start)} ${formatTime(next.start)} — ${next.title}`, String(client.events.length)];
   });
   const blob = new Blob([[header, ...rows].map((row) => row.map(csvCell).join(',')).join('\n')], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
@@ -482,14 +487,16 @@ function ClientDetailModal({ client, profile, onClose }: { client: ClientGroup; 
 function ClientTrackerDirectoryV2({ clients, directory, onDirectoryChange, filename }: { clients: ClientGroup[]; directory: ClientDirectory; onDirectoryChange: (domain: string, value: ClientProfile) => void; filename: string }) {
   const [selected, setSelected] = useState<ClientGroup | null>(null);
   if (!clients.length) return <div className="rounded-2xl border border-white/10 bg-white/[0.035] px-6 py-12 text-center"><UsersRound className="mx-auto h-7 w-7 text-bny-teal/60" /><p className="mt-3 text-sm font-semibold text-bny-paper">No client relationships found</p></div>;
-  const profileFor = (client: ClientGroup): ClientProfile => directory[client.domain] ?? { name: client.domain.replace(/\.[^.]+$/, ''), aliases: [], nextStep: '' };
+  const profileFor = (client: ClientGroup): ClientProfile => directory[client.domain] ?? { name: defaultClientName(client.domain), aliases: [], nextStep: '' };
   return <><div className="max-w-full overflow-x-auto rounded-2xl border border-white/10 bg-[#002c47]/65"><div className="min-w-[960px]"><div className="flex items-center justify-between border-b border-white/10 px-5 py-3"><p className="text-xs text-bny-paper/55">Select a row to view the relationship and meeting history.</p><button type="button" onClick={() => downloadClientCsv(clients, directory, filename)} className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-bny-paper/75 hover:text-bny-teal"><Download className="h-3.5 w-3.5" /> Export CSV</button></div><div className="grid grid-cols-[minmax(150px,.85fr)_minmax(150px,1fr)_minmax(110px,.65fr)_minmax(145px,.9fr)_minmax(140px,.9fr)_90px] gap-4 border-b border-white/10 px-5 py-3 text-[10px] font-bold uppercase tracking-[.14em] text-bny-paper/45"><span>Client</span><span>Contacts</span><span>BNY team</span><span>Next conversation</span><span>Next step</span><span>Upcoming</span></div><div className="divide-y divide-white/10">{clients.map((client) => { const profile = profileFor(client); const next = client.events[0]; return <article key={client.domain} onClick={() => setSelected(client)} className="grid cursor-pointer grid-cols-[minmax(150px,.85fr)_minmax(150px,1fr)_minmax(110px,.65fr)_minmax(145px,.9fr)_minmax(140px,.9fr)_90px] gap-4 px-5 py-5 transition hover:bg-white/[.035]"><div onClick={(event) => event.stopPropagation()}><ClientProfileCard domain={client.domain} profile={profile} onSave={(value) => onDirectoryChange(client.domain, value)} /></div><div className="flex flex-wrap content-start gap-1.5">{[...client.contacts].slice(0, 3).map((contact) => <span key={contact} className="max-w-full break-all rounded-full border border-bny-gold/30 bg-bny-gold/10 px-2 py-1 text-xs text-[#f0d89a]">{contact}</span>)}{client.contacts.size > 3 && <span className="text-xs text-bny-paper/50">+{client.contacts.size - 3}</span>}</div><p className="text-sm text-bny-paper/75">{[...client.owners].join(', ')}</p><div><p className="text-sm font-medium text-bny-paper">{formatDate(next.start)}</p><p className="mt-1 text-xs text-bny-teal">{formatTime(next.start)} · {next.title}</p></div><NextStepCell profile={profile} onSave={(value) => onDirectoryChange(client.domain, value)} /><span className="h-fit whitespace-nowrap rounded-full bg-bny-teal/15 px-2.5 py-1 text-xs font-semibold text-bny-teal">{client.events.length} meeting{client.events.length === 1 ? '' : 's'}</span></article>; })}</div></div></div>{selected && <ClientDetailModal client={selected} profile={profileFor(selected)} onClose={() => setSelected(null)} />}</>;
 }
 
 function CalendarControls({
   rangeDays,
+  meetingScope,
   search,
   onRangeChange,
+  onMeetingScopeChange,
   onSearchChange,
   onShare,
   shareStatus,
@@ -498,8 +505,10 @@ function CalendarControls({
   onTeamOwnerChange,
 }: {
   rangeDays: 7 | 30 | 90;
+  meetingScope: MeetingScope;
   search: string;
   onRangeChange: (days: 7 | 30 | 90) => void;
+  onMeetingScopeChange: (scope: MeetingScope) => void;
   onSearchChange: (value: string) => void;
   onShare: () => void;
   shareStatus: string;
@@ -508,9 +517,7 @@ function CalendarControls({
   onTeamOwnerChange?: (owner: string) => void;
 }) {
   return <div className="mt-5 flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/[.035] p-3 sm:flex-row sm:items-center sm:justify-between">
-    <div className="flex max-w-full items-center gap-1 overflow-x-auto rounded-xl bg-bny-deep/70 p-1" aria-label="Date range">
-      {([7, 30, 90] as const).map((days) => <button key={days} type="button" onClick={() => onRangeChange(days)} className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${rangeDays === days ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/65 hover:text-bny-paper'}`}>Next {days} days</button>)}
-    </div>
+    <div className="flex max-w-full flex-wrap items-center gap-2"><div className="flex items-center gap-1 overflow-x-auto rounded-xl bg-bny-deep/70 p-1" aria-label="Meeting scope"><button type="button" onClick={() => onMeetingScopeChange('upcoming')} className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${meetingScope === 'upcoming' ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/65 hover:text-bny-paper'}`}>Upcoming</button><button type="button" onClick={() => onMeetingScopeChange('all')} className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${meetingScope === 'all' ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/65 hover:text-bny-paper'}`}>All meetings</button></div>{meetingScope === 'upcoming' && <div className="flex items-center gap-1 overflow-x-auto rounded-xl bg-bny-deep/70 p-1" aria-label="Date range">{([7, 30, 90] as const).map((days) => <button key={days} type="button" onClick={() => onRangeChange(days)} className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${rangeDays === days ? 'bg-bny-teal text-bny-deep' : 'text-bny-paper/65 hover:text-bny-paper'}`}>Next {days} days</button>)}</div>}</div>
     <label className="flex min-w-0 items-center gap-2 rounded-xl border border-white/10 bg-bny-deep/40 px-3 py-2 text-sm text-bny-paper/55 sm:w-72">
       <span className="sr-only">Search meetings</span>
       <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0 fill-none stroke-current stroke-2"><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>
@@ -594,6 +601,7 @@ export default function Home() {
   const { personal, team } = persistedCalendars;
   const [errors, setErrors] = useState<string[]>([]);
   const [rangeDays, setRangeDays] = useState<7 | 30 | 90>(30);
+  const [meetingScope, setMeetingScope] = useState<MeetingScope>('upcoming');
   const [search, setSearch] = useState('');
   const [personalView, setPersonalView] = useState<'meetings' | 'tracker'>('meetings');
   const [teamView, setTeamView] = useState<'meetings' | 'tracker'>('meetings');
@@ -659,11 +667,11 @@ export default function Home() {
     rangeEnd.setDate(rangeEnd.getDate() + rangeDays);
     const query = search.trim().toLowerCase();
     return dedupeCalendarEvents(events).filter((event) => {
-      const isWithinRange = event.end >= now && event.start <= rangeEnd;
+      const isWithinRange = meetingScope === 'all' || (event.end >= now && event.start <= rangeEnd);
       const matchesSearch = !query || [event.title, event.owner, ...event.externalAttendees].join(' ').toLowerCase().includes(query);
       return isWithinRange && matchesSearch;
     }).sort((a, b) => a.start.getTime() - b.start.getTime());
-  }, [rangeDays, search]);
+  }, [meetingScope, rangeDays, search]);
 
   const personalEvents = useMemo(() => filterEvents(personal?.events ?? []), [filterEvents, personal]);
   const allTeamEvents = useMemo(() => filterEvents(team.flatMap((calendar) => calendar.events)), [filterEvents, team]);
@@ -724,7 +732,9 @@ export default function Home() {
         {([{ key: 'personal', label: 'My Calendar', icon: CalendarDays }, { key: 'team', label: 'Team Calendars', icon: UsersRound }] as const).map(({ key, label, icon: Icon }) => <button key={key} type="button" role="tab" aria-selected={activeTab === key} onClick={() => setActiveTab(key)} className={`flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-semibold transition ${activeTab === key ? 'border-bny-teal text-bny-teal' : 'border-transparent text-bny-paper/55 hover:text-bny-paper'}`}><Icon className="h-4 w-4" />{label}</button>)}
       </div>
 
-      <CalendarControls rangeDays={rangeDays} search={search} onRangeChange={setRangeDays} onSearchChange={setSearch} onShare={() => void shareView()} shareStatus={shareStatus} teamOwners={activeTab === 'team' && teamView === 'tracker' ? teamOwners : undefined} selectedTeamOwner={selectedTeamOwner} onTeamOwnerChange={setSelectedTeamOwner} />
+      <CalendarControls rangeDays={rangeDays} meetingScope={meetingScope} search={search} onRangeChange={setRangeDays} onMeetingScopeChange={setMeetingScope} onSearchChange={setSearch} onShare={() => void shareView()} shareStatus={shareStatus} teamOwners={activeTab === 'team' && teamView === 'tracker' ? teamOwners : undefined} selectedTeamOwner={selectedTeamOwner} onTeamOwnerChange={setSelectedTeamOwner} />
+
+      {meetingScope === 'all' && <p className="mt-3 text-xs text-bny-paper/55">Showing available client-meeting history and future meetings. Re-upload a calendar once to include its historical events.</p>}
 
       {errors.length > 0 && <div className="mt-5 flex items-start gap-3 rounded-xl border border-red-300/25 bg-red-400/10 p-4 text-sm text-red-100"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><div>{errors.map((error) => <p key={error}>{error}</p>)}</div><button type="button" onClick={() => setErrors([])} className="ml-auto"><X className="h-4 w-4" /></button></div>}
 
